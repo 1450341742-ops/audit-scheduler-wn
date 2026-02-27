@@ -25,7 +25,7 @@ from app.scheduler import (
 from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 
 
-st.set_page_config(page_title="审计排班系统", layout="wide")
+st.set_page_config(page_title="万宁睿和稽查智能排班系统", layout="wide")
 
 # -------------------- 初始化 --------------------
 Base.metadata.create_all(bind=engine)
