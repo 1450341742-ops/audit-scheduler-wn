@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<h4 class="mb-3">导入模板（下载→填写→上传）</h4>
+
+<div class="alert alert-info">
+  <b>目的：</b>把填写字段固定在模板表格中，降低人工录入难度。<br/>
+  <b>流程：</b>下载模板 → 在 Excel 中按列填写 → 上传导入 → 系统自动新增/更新数据。<br/>
+  <b>注意：</b>姓名/城市字段请与系统内一致（中文城市名）。
+</div>
+
+<div class="card mb-4"><div class="card-body">
+  <h6>稽查员模板</h6>
+  <a class="btn btn-outline-primary btn-sm" href="/imports/template/auditors.xlsx">下载稽查员模板（XLSX）</a>
+  <form class="row g-3 mt-2" method="post" action="/imports/upload/auditors" enctype="multipart/form-data">
+    <div class="col-md-9"><input class="form-control" type="file" name="file" accept=".xlsx" required></div>
+    <div class="col-md-3"><button class="btn btn-primary w-100">上传导入</button></div>
+  </form>
+  <div class="form-text">导入规则：同名稽查员会更新，否则新增。</div>
+</div></div>
+
+<div class="card mb-4"><div class="card-body">
+  <h6>任务模板</h6>
+  <a class="btn btn-outline-primary btn-sm" href="/imports/template/tasks.xlsx">下载任务模板（XLSX）</a>
+  <form class="row g-3 mt-2" method="post" action="/imports/upload/tasks" enctype="multipart/form-data">
+    <div class="col-md-9"><input class="form-control" type="file" name="file" accept=".xlsx" required></div>
+    <div class="col-md-3"><button class="btn btn-primary w-100">上传导入</button></div>
+  </form>
+  <div class="form-text">导入规则：按 项目名+开始日期+城市 识别重复并更新，否则新增。</div>
+</div></div>
+
+{% endblock %}

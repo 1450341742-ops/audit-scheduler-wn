@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block content %}
+<h4 class="mb-3">批量排班（按日期范围一键自动排）</h4>
+<div class="alert alert-info">
+  <b>注意排班：</b>批量排班只处理“未排过”的任务；如需重排，请先在【排班】页删除对应排班记录后再批量运行。
+</div>
+
+<div class="card mb-4">
+  <div class="card-body">
+    <form class="row g-3" method="post" action="/batch/run">
+      <div class="col-md-3"><input class="form-control" type="date" name="date_start" required>
+        <div class="form-text">批量排班起始日期（含当天）。</div></div>
+      <div class="col-md-3"><input class="form-control" type="date" name="date_end" required>
+        <div class="form-text">批量排班结束日期（含当天）。</div></div>
+      <div class="col-md-3">
+  <select class="form-select" name="mode">
+    <option value="greedy" selected>快速模式（优先效率）</option>
+    <option value="optimized">优化模式（优先成本与均衡）</option>
+  </select>
+</div>
+<div class="col-md-2"><button class="btn btn-primary w-100">开始批量排班</button></div>
+    </form>
+    <div class="form-text mt-2">只会处理“未排过”的任务；会按 need_expert优先 > 人数多优先 > 开始日期早 排序。优化模式会在候选团队中综合比较“总距离+负荷均衡”。</div>
+  </div>
+</div>
+
+{% if result %}
+<div class="row">
+  <div class="col-md-6">
+    <div class="card mb-4">
+      <div class="card-header">已自动排班（{{result.assigned|length}}）</div>
+      <div class="card-body">
+        {% for a in result.assigned %}
+          <div class="border rounded p-2 mb-2">
+            <div><b>#{{a.task_id}} {{a.project}}</b></div>
+            <div class="small text-muted">负责人：{{a.leader}}；组员：{{", ".join(a.members) if a.members else "无"}}</div>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card mb-4">
+      <div class="card-header">跳过任务（{{result.skipped|length}}）</div>
+      <div class="card-body">
+        {% for s in result.skipped %}
+          <div class="border rounded p-2 mb-2">
+            <div><b>#{{s.task_id}} {{s.project}}</b></div>
+            <div class="small text-danger">原因：{{s.reason}}</div>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

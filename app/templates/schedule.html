@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block content %}
+<h4 class="mb-3">智能排班（V1.6：字段解释完善）</h4>
+<div class="alert alert-info">
+  <b>注意排班：</b>“缓冲日冲突”默认前后各+1天；若你们希望更紧凑/更宽松，可在 <code>app/config.py</code> 调整 TRAVEL_BUFFER_DAYS。优化模式更适合月度/周度批量排班。
+</div>
+
+<div class="card mb-4">
+  <div class="card-body">
+    <form class="row g-2" method="post" action="/schedule/recommend">
+      <div class="col-md-8">
+        <select class="form-select" name="task_id" required>
+          <option value="">选择一个任务…</option>
+          {% for t in tasks %}
+            <option value="{{t.id}}">#{{t.id}} {{t.project_name}}｜{{t.site_city}}｜{{t.start_date}}｜{{t.required_days}}天｜{{t.required_headcount}}人{% if t.need_expert %}｜需要A带队{% endif %}{% if t.required_gender!="不限" %}｜性别:{{t.required_gender}}{% endif %}{% if t.specified_auditors %}｜指定:{{t.specified_auditors}}{% endif %}</option>
+          {% endfor %}
+        </select>
+        <div class="form-text">推荐逻辑：先按硬约束筛选（状态/冲突/周上限/性别/指定人/need_expert），再按“距离优先（越近越高）+适度负荷均衡”评分排序。点击“推荐”后可查看候选人解释。</div>
+      </div>
+      <div class="col-md-2"><button class="btn btn-primary w-100">推荐</button></div>
+    </form>
+  </div>
+</div>
+
+{% if picked_task %}
+<div class="alert alert-secondary">
+  已选择：<b>{{picked_task.project_name}}</b>（{{picked_task.site_city}}，{{picked_task.start_date}}，{{picked_task.required_days}}天，{{picked_task.required_headcount}}人；需要A带队：{{"是" if picked_task.need_expert else "否"}}）
+</div>
+{% endif %}
+
+{% if error %}<div class="alert alert-danger">{{error}}</div>{% endif %}
+
+{% if team %}
+<div class="card mb-4">
+  <div class="card-header">系统推荐团队方案</div>
+  <div class="card-body">
+    <p><b>负责人：</b>{{team.leader.auditor_name}}（{{team.leader.group_level}}，{{"可带队" if team.leader.can_lead_team else "不可带队"}}，出发地{{team.leader.from_city}}，{{"%.0f"|format(team.leader.km)}}km，{{team.leader.score}}）</p>
+    <p><b>组员：</b>
+      {% for m in team.members %}
+        <span class="badge text-bg-light border me-2">{{m.auditor_name}}（{{m.group_level}}，出发地{{m.from_city}}，{{"%.0f"|format(m.km)}}km，{{m.score}}）</span>
+      {% endfor %}
+    </p>
+    <p class="text-muted small">{{team.notes}}｜团队评分 {{team.team_score}}</p>
+
+    <form method="post" action="/schedule/assign_team" class="row g-2">
+      <input type="hidden" name="task_id" value="{{picked_task.id}}">
+      <input type="hidden" name="leader_id" value="{{team.leader.auditor_id}}">
+      <div class="col-md-10">
+        <input class="form-control" name="member_ids" value="{% for m in team.members %}{{m.auditor_id}}{% if not loop.last %},{% endif %}{% endfor %}" placeholder="组员ID（逗号分隔）">
+        <div class="form-text">组员ID可手工调整（逗号分隔）。确认指派后会落库并自动更新人员 last_city/last_date。</div>
+      </div>
+      <div class="col-md-2"><button class="btn btn-success w-100">确认指派</button></div>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+{% if candidates %}
+<div class="card mb-4">
+  <div class="card-header">候选人TOP25</div>
+  <div class="card-body">
+    <div class="table-responsive"><table class="table table-sm">
+      <thead><tr><th>排名</th><th>姓名</th><th>组别</th><th>带队</th><th>出发地</th><th>距离</th><th>评分</th><th>解释</th></tr></thead>
+      <tbody>
+      {% for c in candidates %}
+        <tr>
+          <td>{{loop.index}}</td><td>{{c.auditor_name}}</td><td>{{c.group_level}}</td><td>{{"是" if c.can_lead_team else "否"}}</td>
+          <td>{{c.from_city}}</td><td>{{"%.0f"|format(c.km)}}km</td><td><b>{{c.score}}</b></td><td class="text-muted small">{{c.explain}}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+  </div>
+</div>
+{% endif %}
+
+<h5 class="mt-4">最近排班记录（TOP120）</h5>
+<table class="table table-sm table-striped bg-white">
+  <thead><tr><th>ID</th><th>任务</th><th>人员</th><th>角色</th><th>时间</th><th>路线</th><th>km</th><th></th></tr></thead>
+  <tbody>
+  {% for s in schedules %}
+    <tr>
+      <td>{{s.id}}</td><td>#{{s.task_id}} {{s.task.project_name}}</td><td>#{{s.auditor_id}} {{s.auditor.name}} ({{s.auditor.group_level}})</td>
+      <td>{{s.role}}</td><td>{{s.start_date}}~{{s.end_date}}</td><td>{{s.travel_from_city}}→{{s.travel_to_city}}</td><td>{{"%.0f"|format(s.distance_km)}}</td>
+      <td><form method="post" action="/schedule/delete/{{s.id}}"><button class="btn btn-outline-danger btn-sm">删除</button></form></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

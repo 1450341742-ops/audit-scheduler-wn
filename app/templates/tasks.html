@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+<h4 class="mb-3">任务录入</h4>
+<div class="alert alert-info">
+  <b>注意排班：</b>若“需要A带队=是”，请确保系统中存在 A组且“可带队”的稽查员，否则会提示“无可用团队”。
+</div>
+<div class="card mb-4">
+  <div class="card-body">
+    <form class="row g-3" method="post" action="/tasks/create">
+      <div class="col-md-3"><input class="form-control" name="project_name" placeholder="项目名称" required>
+        <div class="form-text">项目/任务名称（用于查询与排班记录）。</div></div>
+      <div class="col-md-2"><input class="form-control" name="customer_name" placeholder="客户(可选)">
+        <div class="form-text">可选：客户名/申办方（当前不参与规则，仅记录）。</div></div>
+      <div class="col-md-2"><select class="form-select" name="need_expert"><option value="no" selected>不需要A带队</option><option value="yes">需要A带队</option></select></div>
+      <div class="col-md-2"><input class="form-control" name="required_headcount" type="number" min="1" value="1" placeholder="人数">
+        <div class="form-text">本任务需派出的人数（≥2 时自动组队：leader+members）。</div></div>
+      <div class="col-md-2"><input class="form-control" name="required_days" type="number" min="1" value="1" placeholder="天数">
+        <div class="form-text">任务持续天数（连续占用；冲突判断含前后缓冲日）。</div></div>
+      <div class="col-md-2"><select class="form-select" name="required_gender"><option value="不限" selected>不限</option><option value="男">男</option><option value="女">女</option></select></div>
+      <div class="col-md-2"><input class="form-control" name="specified_auditors" placeholder="指定人员(可选)">
+        <div class="form-text">可选：仅允许指定名单（姓名用逗号/顿号/空格分隔）。</div></div>
+      <div class="col-md-2"><input class="form-control" name="site_city" placeholder="中心地点(如 苏州)" required>
+        <div class="form-text">中心地点城市（用于距离计算/就近推荐）。</div></div>
+      <div class="col-md-2"><input class="form-control" type="date" name="start_date" required>
+        <div class="form-text">任务开始日期（用于周上限统计与冲突判断）。</div></div>
+      <div class="col-md-2"><button class="btn btn-primary w-100">新增</button></div>
+    </form>
+  </div>
+</div>
+
+<div class="table-responsive"><table class="table table-sm table-striped bg-white">
+  <thead><tr><th>ID</th><th>项目</th><th>地点</th><th>开始</th><th>结束</th><th>天数</th><th>人数</th><th>需要A</th><th>性别</th><th>指定(硬)</th><th>指定专家(软)</th><th></th></tr></thead>
+  <tbody>
+  {% for t in tasks %}
+    <tr>
+      <td>{{t.id}}</td><td>{{t.project_name}}</td><td>{{t.site_city}}</td><td>{{t.start_date}}</td><td>{{t.end_date}}</td>
+      <td>{{t.required_days}}</td><td>{{t.required_headcount}}</td><td>{{"是" if t.need_expert else "否"}}</td>
+      <td>{{t.required_gender}}</td><td>{{t.specified_auditors}}</td><td>{{t.preferred_experts}}</td>
+      <td><form method="post" action="/tasks/delete/{{t.id}}"><button class="btn btn-outline-danger btn-sm">删除</button></form></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endblock %}

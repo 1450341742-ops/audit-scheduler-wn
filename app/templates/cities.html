@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block content %}
+<h4 class="mb-3">城市坐标表（用于自动计算全国城市直线距离）</h4>
+
+<div class="alert alert-info">
+  <b>减少人工录入：</b>你不需要维护“全国城市对距离”。系统会先查【城市距离表】；若未命中，则用【城市坐标表】计算直线距离并自动写回距离表做缓存。<br/>
+  <b>注意：</b>本包内置的是“常用城市坐标种子”。如遇到未识别城市，可在此页补充一次，或用 CSV 批量导入（name,lat,lon）。
+</div>
+
+<div class="card mb-4">
+  <div class="card-body">
+    <form class="row g-3" method="post" action="/cities/upsert">
+      <div class="col-md-3"><input class="form-control" name="name" placeholder="城市名（如 苏州）" required><div class="form-text">中文城市名需与任务/人员的城市字段一致。</div></div>
+      <div class="col-md-3"><input class="form-control" name="lat" type="number" step="0.000001" placeholder="纬度 lat" required><div class="form-text">例如北京 39.9042</div></div>
+      <div class="col-md-3"><input class="form-control" name="lon" type="number" step="0.000001" placeholder="经度 lon" required><div class="form-text">例如北京 116.4074</div></div>
+      <div class="col-md-3"><button class="btn btn-primary w-100">新增/更新</button></div>
+    </form>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-body">
+    <form class="row g-3" method="post" action="/cities/import" enctype="multipart/form-data">
+      <div class="col-md-9">
+        <input class="form-control" type="file" name="file" accept=".csv" required>
+        <div class="form-text">CSV 格式：name,lat,lon（可含表头）。一次导入即可覆盖全国城市坐标。</div>
+      </div>
+      <div class="col-md-3"><button class="btn btn-outline-primary w-100">批量导入 CSV</button></div>
+    </form>
+  </div>
+</div>
+
+<div class="table-responsive">
+<table class="table table-sm table-striped bg-white">
+  <thead><tr><th>ID</th><th>城市</th><th>lat</th><th>lon</th><th></th></tr></thead>
+  <tbody>
+  {% for c in cities %}
+    <tr>
+      <td>{{c.id}}</td><td>{{c.name}}</td><td>{{"%.6f"|format(c.lat)}}</td><td>{{"%.6f"|format(c.lon)}}</td>
+      <td><form method="post" action="/cities/delete/{{c.id}}"><button class="btn btn-outline-danger btn-sm">删除</button></form></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

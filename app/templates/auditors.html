@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+<h4 class="mb-3">稽查员管理（含 last_city/last_date）</h4>
+<div class="alert alert-info">
+  <b>注意排班：</b>本系统会按硬约束（状态/周上限/时间冲突/性别/指定人/need_expert）先筛选，再按“就近+负荷均衡”排序推荐。建议维护 last_city/last_date 与城市距离表，推荐结果会更贴近真实差旅成本。
+</div>
+<div class="card mb-4">
+  <div class="card-body">
+    <form class="row g-3" method="post" action="/auditors/create">
+      <div class="col-md-2"><input class="form-control" name="name" placeholder="姓名" required>
+        <div class="form-text">用于指定人匹配/记录。建议与公司花名册一致。</div></div>
+      <div class="col-md-2"><select class="form-select" name="gender"><option value="男" selected>男</option><option value="女">女</option></select></div>
+      <div class="col-md-2"><select class="form-select" name="group_level"><option value="A">A专家</option><option value="B" selected>B普通</option><option value="C">C助理</option></select></div>
+      <div class="col-md-2"><select class="form-select" name="can_lead_team"><option value="no" selected>不可带队</option><option value="yes">可带队</option></select></div>
+      <div class="col-md-2"><input class="form-control" name="base_city" placeholder="BASE城市" required>
+        <div class="form-text">默认出发城市（当 last_city 不满足阈值时回退到BASE）。</div></div>
+      <div class="col-md-2"><input class="form-control" name="max_weekly_tasks" type="number" min="0" value="1" placeholder="每周上限(院次)">
+        <div class="form-text">周上限：每人每周最多可排的“任务次数/院次”（硬约束）。常用1或2。</div></div>
+      <div class="col-md-2"><select class="form-select" name="status"><option value="active" selected>在岗</option><option value="leave">请假</option><option value="frozen">冻结</option></select></div>
+      <div class="col-md-2"><input class="form-control" name="monthly_cases" type="number" min="0" value="0" placeholder="本月已排院次">
+        <div class="form-text">本月已排院次（用于负荷均衡惩罚；可先填0，系统会自动累加）。</div></div>
+      <div class="col-md-2"><input class="form-control" name="travel_days" type="number" min="0" value="0" placeholder="本月出差天数">
+        <div class="form-text">本月出差天数（用于负荷均衡；可先填0）。</div></div>
+      <div class="col-md-2"><input class="form-control" name="continuous_days" type="number" min="0" value="0" placeholder="连续出差天数">
+        <div class="form-text">连续出差天数（用于避免疲劳；>5会被惩罚）。</div></div>
+      <div class="col-md-2"><input class="form-control" name="last_task_end_city" placeholder="上一院结束城市(可选)">
+        <div class="form-text">上一院结束城市（用于就近续排/链式加成）。不填则按BASE计算。</div></div>
+      <div class="col-md-2"><input class="form-control" type="date" name="last_task_end_date">
+        <div class="form-text">上一院结束日期（用于判断是否可串联；不填则按BASE计算）。</div></div>
+      <div class="col-md-2"><button class="btn btn-primary w-100">新增</button></div>
+    </form>
+    <div class="form-text mt-2">字段说明：周上限=每周最多可排院次；本月已排院次/本月出差天数/连续出差天数用于负荷均衡；上一院结束城市/日期用于就近续排与链式加成。</div>
+  </div>
+</div>
+
+<div class="table-responsive"><table class="table table-sm table-striped bg-white">
+  <thead><tr><th>ID</th><th>姓名</th><th>组别</th><th>带队</th><th>BASE</th><th>last_city</th><th>last_date</th><th>周上限</th><th>状态</th><th></th></tr></thead>
+  <tbody>
+  {% for a in auditors %}
+    <tr>
+      <td>{{a.id}}</td><td>{{a.name}}</td><td>{{a.group_level}}</td><td>{{"是" if a.can_lead_team else "否"}}</td>
+      <td>{{a.base_city}}</td><td>{{a.last_task_end_city}}</td><td>{{a.last_task_end_date}}</td><td>{{a.max_weekly_tasks}}</td><td>{{a.status}}</td>
+      <td><form method="post" action="/auditors/delete/{{a.id}}"><button class="btn btn-outline-danger btn-sm">删除</button></form></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endblock %}
