@@ -3,6 +3,7 @@ import io
 import json
 import os
 import re
+import hashlib
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Optional
 
 import streamlit as st
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 
 from app.db import Base, SessionLocal, engine, ensure_schema
 from app.models import Auditor, Task, Schedule, CityDistance, City
@@ -102,6 +104,207 @@ def seed_cities_if_needed(db: Session):
 with db_session() as db:
     seed_city_distances_if_needed(db)
     seed_cities_if_needed(db)
+
+
+
+# -------------------- 登录认证（数据库持久化） --------------------
+def hash_password(password: str) -> str:
+    return hashlib.sha256(str(password).encode("utf-8")).hexdigest()
+
+
+def ensure_auth_table():
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS auth_users (
+                    username TEXT PRIMARY KEY,
+                    password_hash TEXT NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT
+                )
+                """
+            )
+        )
+
+
+def _bootstrap_seed_users() -> dict[str, str]:
+    users = {}
+    try:
+        secret_users = st.secrets.get("auth_users", None)
+        if secret_users:
+            users = {str(k): str(v) for k, v in dict(secret_users).items()}
+    except Exception:
+        pass
+    if not users:
+        env_json = os.environ.get("AUTH_USERS_JSON", "").strip()
+        if env_json:
+            try:
+                data = json.loads(env_json)
+                if isinstance(data, dict):
+                    users = {str(k): str(v) for k, v in data.items()}
+            except Exception:
+                pass
+    if not users:
+        users = {"admin": "admin123"}
+    return users
+
+
+def bootstrap_auth_users_if_needed():
+    ensure_auth_table()
+    with engine.begin() as conn:
+        count = conn.execute(text("SELECT COUNT(*) FROM auth_users")).scalar() or 0
+        if int(count) > 0:
+            return
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for username, password in _bootstrap_seed_users().items():
+            clean_user = str(username).strip()
+            if not clean_user:
+                continue
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO auth_users (username, password_hash, is_admin, created_at)
+                    VALUES (:username, :password_hash, :is_admin, :created_at)
+                    """
+                ),
+                {
+                    "username": clean_user,
+                    "password_hash": hash_password(str(password)),
+                    "is_admin": 1 if clean_user == "admin" else 0,
+                    "created_at": now,
+                },
+            )
+
+
+def list_auth_users() -> list[dict]:
+    ensure_auth_table()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT username, is_admin, created_at FROM auth_users ORDER BY is_admin DESC, username ASC"
+            )
+        ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def get_auth_user(username: str) -> Optional[dict]:
+    ensure_auth_table()
+    clean_user = str(username or "").strip()
+    if not clean_user:
+        return None
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                "SELECT username, password_hash, is_admin, created_at FROM auth_users WHERE username = :username"
+            ),
+            {"username": clean_user},
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def create_auth_user(username: str, password: str, is_admin: bool = False) -> tuple[bool, str]:
+    ensure_auth_table()
+    clean_user = str(username or "").strip()
+    if not clean_user:
+        return False, "账号不能为空"
+    if len(clean_user) < 3:
+        return False, "账号至少 3 位"
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", clean_user):
+        return False, "账号仅支持字母、数字、下划线、点、短横线"
+    if len(str(password or "")) < 6:
+        return False, "密码至少 6 位"
+    if get_auth_user(clean_user):
+        return False, "该账号已存在"
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO auth_users (username, password_hash, is_admin, created_at)
+                VALUES (:username, :password_hash, :is_admin, :created_at)
+                """
+            ),
+            {
+                "username": clean_user,
+                "password_hash": hash_password(password),
+                "is_admin": 1 if is_admin else 0,
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
+        )
+    return True, "新增账号成功"
+
+
+def update_auth_password(username: str, new_password: str) -> tuple[bool, str]:
+    ensure_auth_table()
+    clean_user = str(username or "").strip()
+    if not clean_user:
+        return False, "账号不能为空"
+    if len(str(new_password or "")) < 6:
+        return False, "新密码至少 6 位"
+    if not get_auth_user(clean_user):
+        return False, "账号不存在"
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "UPDATE auth_users SET password_hash = :password_hash WHERE username = :username"
+            ),
+            {"username": clean_user, "password_hash": hash_password(new_password)},
+        )
+    return True, "密码修改成功"
+
+
+def delete_auth_user(username: str, current_user: str) -> tuple[bool, str]:
+    ensure_auth_table()
+    clean_user = str(username or "").strip()
+    if clean_user == "admin":
+        return False, "默认管理员 admin 不允许删除"
+    if clean_user == str(current_user or "").strip():
+        return False, "不能删除当前登录账号"
+    if not get_auth_user(clean_user):
+        return False, "账号不存在"
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM auth_users WHERE username = :username"), {"username": clean_user})
+    return True, "账号已删除"
+
+
+def check_login(username: str, password: str) -> bool:
+    user = get_auth_user(username)
+    if not user:
+        return False
+    return str(user.get("password_hash")) == hash_password(str(password))
+
+
+bootstrap_auth_users_if_needed()
+
+
+def render_login():
+    st.title("审计排班系统")
+    st.subheader("账号密码登录")
+    st.caption("首次使用默认管理员：admin / admin123。登录后可在【账号管理】中新增人员、修改密码。")
+    with st.form("login_form", clear_on_submit=False):
+        username = st.text_input("账号")
+        password = st.text_input("密码", type="password")
+        submitted = st.form_submit_button("登录", type="primary")
+    if submitted:
+        if check_login(username, password):
+            user = get_auth_user(username)
+            st.session_state["logged_in"] = True
+            st.session_state["login_user"] = str(username).strip()
+            st.session_state["is_admin"] = bool(int(user.get("is_admin", 0))) if user else False
+            st.success("登录成功，正在进入系统…")
+            st.rerun()
+        else:
+            st.error("账号或密码错误")
+    st.stop()
+
+
+if "logged_in" not in st.session_state:
+    st.session_state["logged_in"] = False
+if "is_admin" not in st.session_state:
+    st.session_state["is_admin"] = False
+
+if not st.session_state["logged_in"]:
+    render_login()
 
 # -------------------- 常量 --------------------
 STATUS_MAP = {"在岗": "active", "请假": "leave", "冻结": "frozen"}
@@ -344,6 +547,12 @@ def load_day_marks():
 
 # -------------------- 侧边栏 --------------------
 st.sidebar.title("审计排班系统")
+st.sidebar.caption(f"当前用户：{st.session_state.get('login_user', '')}")
+if st.sidebar.button("退出登录"):
+    st.session_state["logged_in"] = False
+    st.session_state["is_admin"] = False
+    st.session_state.pop("login_user", None)
+    st.rerun()
 page = st.sidebar.radio(
     "功能导航",
     [
@@ -355,6 +564,7 @@ page = st.sidebar.radio(
         "城市坐标",
         "模板导入",
         "日历视图",
+        "账号管理",
     ],
 )
 
@@ -1001,6 +1211,95 @@ elif page == "模板导入":
                     db.commit()
                 st.success(f"已导入 / 更新 {imported} 条任务记录。")
                 st.rerun()
+
+# -------------------- 页面：账号管理 --------------------
+elif page == "账号管理":
+    st.title("账号管理")
+    current_user = st.session_state.get("login_user", "")
+    is_admin = bool(st.session_state.get("is_admin", False))
+
+    st.subheader("我的密码")
+    with st.form("change_my_password", clear_on_submit=True):
+        old_pw = st.text_input("当前密码", type="password")
+        new_pw = st.text_input("新密码（至少6位）", type="password")
+        new_pw2 = st.text_input("确认新密码", type="password")
+        if st.form_submit_button("修改我的密码", type="primary"):
+            if not check_login(current_user, old_pw):
+                st.error("当前密码不正确")
+            elif new_pw != new_pw2:
+                st.error("两次输入的新密码不一致")
+            else:
+                ok, msg = update_auth_password(current_user, new_pw)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+
+    st.divider()
+
+    if not is_admin:
+        st.info("当前账号仅可修改自己的密码。新增登录人员、重置他人密码仅管理员可操作。")
+    else:
+        st.subheader("新增登录人员")
+        with st.form("create_user_form", clear_on_submit=True):
+            c1, c2, c3 = st.columns(3)
+            new_username = c1.text_input("新账号")
+            new_password = c2.text_input("初始密码（至少6位）", type="password")
+            new_is_admin = c3.selectbox("权限", ["普通用户", "管理员"])
+            if st.form_submit_button("新增账号", type="primary"):
+                ok, msg = create_auth_user(new_username, new_password, is_admin=(new_is_admin == "管理员"))
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+
+        st.subheader("现有登录账号")
+        users = list_auth_users()
+        if users:
+            rows = []
+            for u in users:
+                rows.append(
+                    {
+                        "账号": u.get("username"),
+                        "权限": "管理员" if int(u.get("is_admin", 0)) == 1 else "普通用户",
+                        "创建时间": u.get("created_at") or "",
+                    }
+                )
+            show_table(rows, 260)
+        else:
+            st.info("暂无账号")
+
+        st.subheader("重置其他人员密码")
+        user_labels = [u["username"] for u in users]
+        if user_labels:
+            with st.form("reset_password_form", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                reset_user = c1.selectbox("选择账号", user_labels)
+                reset_pw = c2.text_input("新密码（至少6位）", type="password")
+                if st.form_submit_button("重置密码"):
+                    ok, msg = update_auth_password(reset_user, reset_pw)
+                    if ok:
+                        st.success(f"{reset_user}：{msg}")
+                    else:
+                        st.error(msg)
+
+            st.subheader("删除登录账号")
+            deletable = [u for u in user_labels if u not in ("admin", current_user)]
+            if deletable:
+                with st.form("delete_user_form", clear_on_submit=True):
+                    del_user = st.selectbox("选择要删除的账号", deletable)
+                    confirm_text = st.text_input("输入 DELETE 确认删除")
+                    if st.form_submit_button("删除账号"):
+                        if confirm_text != "DELETE":
+                            st.error("请输入 DELETE 以确认删除")
+                        else:
+                            ok, msg = delete_auth_user(del_user, current_user)
+                            if ok:
+                                st.success(msg)
+                            else:
+                                st.error(msg)
+            else:
+                st.info("当前没有可删除的账号（默认 admin 和当前登录账号不可删除）。")
 
 # -------------------- 页面：日历视图 --------------------
 elif page == "日历视图":
