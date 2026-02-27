@@ -69,6 +69,17 @@ def show_table(rows: list[dict], height: int = 380):
     st.dataframe(rows, use_container_width=True, height=height)
 
 
+def make_xlsx_bytes(rows: list[dict], sheet_name: str = "sheet") -> bytes:
+    import pandas as pd
+
+    bio = io.BytesIO()
+    df = pd.DataFrame(rows)
+    with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    bio.seek(0)
+    return bio.getvalue()
+
+
 def seed_city_distances_if_needed(db: Session):
     seen = set()
     for a, b, km in SEED_CITY_DISTANCES:
@@ -588,7 +599,10 @@ if page == "智能排班":
     if not tasks:
         st.info("请先在【任务管理】中录入任务。")
     else:
-        task_options = {f"#{t.id} {t.project_name}｜{t.site_city}｜{d2s(t.start_date)}｜{t.required_days}天｜{t.required_headcount}人": t.id for t in tasks}
+        task_options = {
+            f"#{t.id} {t.project_name}｜{t.site_city}｜{d2s(t.start_date)}｜{t.required_days}天｜{t.required_headcount}人": t.id
+            for t in tasks
+        }
         selected_label = st.selectbox("选择任务", list(task_options.keys()))
         selected_task_id = task_options[selected_label]
         col_a, col_b = st.columns([1, 3])
@@ -702,7 +716,11 @@ elif page == "批量排班":
     c1, c2, c3 = st.columns([1, 1, 1])
     date_start = c1.date_input("开始日期", value=date.today())
     date_end = c2.date_input("结束日期", value=date.today() + timedelta(days=30))
-    mode = c3.selectbox("模式", ["greedy", "optimized"], format_func=lambda x: "快速模式（优先效率）" if x == "greedy" else "优化模式（优先成本与均衡）")
+    mode = c3.selectbox(
+        "模式",
+        ["greedy", "optimized"],
+        format_func=lambda x: "快速模式（优先效率）" if x == "greedy" else "优化模式（优先成本与均衡）",
+    )
     if st.button("开始批量排班", type="primary"):
         with db_session() as db:
             report = run_batch_schedule(db, date_start, date_end, mode)
@@ -735,9 +753,9 @@ elif page == "稽查员管理":
     with st.form("auditor_form", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
         name = c1.text_input("姓名*")
-        gender = c2.selectbox("性别", ["男", "女"])
+        gender = c2.selectbox("性别", ["男", "女"], index=1)
         group_level = c3.selectbox("等级", ["A", "B", "C"], index=1)
-        can_lead = c4.selectbox("可带队", ["否", "是"])
+        can_lead = c4.selectbox("可带队", ["否", "是"], index=1)
 
         c5, c6, c7, c8 = st.columns(4)
         base_city = c5.text_input("常驻城市*")
@@ -749,7 +767,15 @@ elif page == "稽查员管理":
         travel_days = c9.number_input("本月差旅天数", min_value=0, value=0, step=1)
         continuous_days = c10.number_input("连续工作天数", min_value=0, value=0, step=1)
         last_city = c11.text_input("上次结束城市")
-        last_date_text = c12.text_input("上次结束日期（YYYY-MM-DD）")
+
+        with c12:
+            use_last_end_date = st.checkbox("填写上次结束日期", value=False, key="use_last_end_date")
+            last_end_date_value = st.date_input(
+                "上次结束日期",
+                value=date.today(),
+                key="last_end_date_value",
+                disabled=not use_last_end_date,
+            )
 
         if st.form_submit_button("新增稽查员", type="primary"):
             if not name.strip() or not base_city.strip():
@@ -769,7 +795,7 @@ elif page == "稽查员管理":
                             travel_days=int(travel_days),
                             continuous_days=int(continuous_days),
                             last_task_end_city=last_city.strip() or None,
-                            last_task_end_date=safe_parse_date(last_date_text),
+                            last_task_end_date=last_end_date_value if use_last_end_date else None,
                         )
                     )
                     db.commit()
@@ -799,7 +825,11 @@ elif page == "稽查员管理":
         )
     show_table(rows)
     if auditors:
-        delete_id = st.selectbox("删除稽查员（按ID）", [a.id for a in auditors], format_func=lambda x: f"{x} - {next(a.name for a in auditors if a.id == x)}")
+        delete_id = st.selectbox(
+            "删除稽查员（按ID）",
+            [a.id for a in auditors],
+            format_func=lambda x: f"{x} - {next(a.name for a in auditors if a.id == x)}",
+        )
         if st.button("删除所选稽查员"):
             with db_session() as db:
                 obj = db.query(Auditor).filter(Auditor.id == delete_id).first()
@@ -824,11 +854,19 @@ elif page == "任务管理":
         required_gender = c6.selectbox("性别要求", ["不限", "男", "女"])
         site_city = c7.text_input("中心城市*")
 
-        c8, c9, c10 = st.columns(3)
+        c8, c9, c10, c11 = st.columns(4)
         specified = c8.text_input("硬指定人员（可空）")
         preferred = c9.text_input("软指定专家/老师（可空）")
         start_date = c10.date_input("开始日期", value=date.today())
-        end_date_text = st.text_input("结束日期（可空，YYYY-MM-DD）")
+
+        with c11:
+            use_end_date = st.checkbox("填写结束日期", value=False, key="use_task_end_date")
+            end_date_value = st.date_input(
+                "结束日期",
+                value=date.today(),
+                key="task_end_date_value",
+                disabled=not use_end_date,
+            )
 
         if st.form_submit_button("新增任务", type="primary"):
             if not project_name.strip() or not site_city.strip():
@@ -847,7 +885,7 @@ elif page == "任务管理":
                             preferred_experts=preferred.strip() or None,
                             site_city=site_city.strip(),
                             start_date=start_date,
-                            end_date=safe_parse_date(end_date_text),
+                            end_date=end_date_value if use_end_date else None,
                         )
                     )
                     db.commit()
@@ -876,7 +914,11 @@ elif page == "任务管理":
         )
     show_table(rows)
     if tasks:
-        delete_id = st.selectbox("删除任务（按ID）", [t.id for t in tasks], format_func=lambda x: f"{x} - {next(t.project_name for t in tasks if t.id == x)}")
+        delete_id = st.selectbox(
+            "删除任务（按ID）",
+            [t.id for t in tasks],
+            format_func=lambda x: f"{x} - {next(t.project_name for t in tasks if t.id == x)}",
+        )
         if st.button("删除所选任务"):
             with db_session() as db:
                 obj = db.query(Task).filter(Task.id == delete_id).first()
@@ -900,7 +942,10 @@ elif page == "城市距离":
                 st.error("出发城市、到达城市必填。")
             else:
                 with db_session() as db:
-                    rec = db.query(CityDistance).filter(CityDistance.from_city == from_city.strip(), CityDistance.to_city == to_city.strip()).first()
+                    rec = db.query(CityDistance).filter(
+                        CityDistance.from_city == from_city.strip(),
+                        CityDistance.to_city == to_city.strip(),
+                    ).first()
                     if rec:
                         rec.km = float(km)
                     else:
@@ -1187,7 +1232,11 @@ elif page == "模板导入":
                         else:
                             end_d = safe_parse_date(str(ed_raw or ""))
 
-                        rec = db.query(Task).filter(Task.project_name == project_name, Task.start_date == start_d, Task.site_city == site_city).first()
+                        rec = db.query(Task).filter(
+                            Task.project_name == project_name,
+                            Task.start_date == start_d,
+                            Task.site_city == site_city,
+                        ).first()
                         if rec:
                             rec.customer_name = customer_name
                             rec.need_expert = need_expert
@@ -1335,7 +1384,11 @@ elif page == "日历视图":
         if s.start_date <= month_end and s.end_date >= month_start:
             filtered.append(s)
 
-    day_marks = {it.get("date"): it for it in load_day_marks() if it.get("date", "")[:7] == month_start.strftime("%Y-%m")}
+    day_marks = {
+        it.get("date"): it
+        for it in load_day_marks()
+        if it.get("date", "")[:7] == month_start.strftime("%Y-%m")
+    }
 
     st.subheader(f"{year}年{month}月 日历总览")
     weeks = []
@@ -1397,6 +1450,15 @@ elif page == "日历视图":
             }
         )
     show_table(rows, 320)
+
+    if rows:
+        excel_bytes = make_xlsx_bytes(rows, sheet_name="日历排班明细")
+        st.download_button(
+            "导出本月排班明细（Excel）",
+            data=excel_bytes,
+            file_name=f"日历排班明细_{year}_{month:02d}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
     with db_session() as db:
         all_ics = build_ics_events(db)
