@@ -271,7 +271,7 @@ def check_login(username: str, password: str) -> bool:
     user = get_auth_user(username)
     if not user:
         return False
-    return str(user.get("password_hash")) == Fhash_password(str(password))
+    return str(user.get("password_hash")) == hash_password(str(password))
 
 
 bootstrap_auth_users_if_needed()
