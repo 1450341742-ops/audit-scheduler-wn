@@ -25,7 +25,10 @@ from app.scheduler import (
 from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 
 
-st.set_page_config(page_title="万宁睿和稽查智能排班系统", layout="wide")
+SYSTEM_NAME = "万宁睿和稽查排班"
+SYSTEM_FULL_NAME = "万宁睿和稽查排班系统"
+
+st.set_page_config(page_title=SYSTEM_FULL_NAME, layout="wide")
 
 # -------------------- 初始化 --------------------
 Base.metadata.create_all(bind=engine)
@@ -77,7 +80,9 @@ def seed_city_distances_if_needed(db: Session):
         if key in seen:
             continue
         seen.add(key)
-        exists = db.query(CityDistance).filter(CityDistance.from_city == a, CityDistance.to_city == b).first()
+        exists = db.query(CityDistance).filter(
+            CityDistance.from_city == a, CityDistance.to_city == b
+        ).first()
         if exists:
             continue
         db.add(CityDistance(from_city=a, to_city=b, km=float(km)))
@@ -104,7 +109,6 @@ def seed_cities_if_needed(db: Session):
 with db_session() as db:
     seed_city_distances_if_needed(db)
     seed_cities_if_needed(db)
-
 
 
 # -------------------- 登录认证（数据库持久化） --------------------
@@ -278,7 +282,7 @@ bootstrap_auth_users_if_needed()
 
 
 def render_login():
-    st.title("万宁睿和稽查智能排班系统")
+    st.title(SYSTEM_FULL_NAME)
     st.subheader("账号密码登录")
     st.caption("首次使用默认管理员：admin / admin123。登录后可在【账号管理】中新增人员、修改密码。")
     with st.form("login_form", clear_on_submit=False):
@@ -546,33 +550,36 @@ def load_day_marks():
 
 
 # -------------------- 侧边栏 --------------------
-st.sidebar.title("万宁睿和稽查智能排班系统系统")
+st.sidebar.title(SYSTEM_NAME)
 st.sidebar.caption(f"当前用户：{st.session_state.get('login_user', '')}")
+
 if st.sidebar.button("退出登录"):
     st.session_state["logged_in"] = False
     st.session_state["is_admin"] = False
     st.session_state.pop("login_user", None)
     st.rerun()
-page = st.sidebar.radio(
-    "功能导航",
-    [
-        "智能排班",
-        "批量排班",
-        "稽查员管理",
-        "任务管理",
-        "城市距离",
-        "城市坐标",
-        "模板导入",
-        "日历视图",
-        "账号管理",
-    ],
-)
 
-st.sidebar.caption("纯 Streamlit 版本：已去除 iframe / 127.0.0.1 依赖，可直接分享给同事使用。")
+PAGE_OPTIONS = [
+    "智能排班",
+    "批量排班",
+    "稽查员管理",
+    "任务管理",
+    "城市距离",
+    "城市坐标",
+    "模板导入",
+    "日历视图",
+    "账号管理",
+]
+
+page = st.sidebar.radio("功能导航", PAGE_OPTIONS)
+
+st.sidebar.caption(f"当前位置：{page}")
+st.sidebar.caption("纯 Streamlit 版本：可直接分享给同事使用。")
+
 
 # -------------------- 页面：智能排班 --------------------
 if page == "智能排班":
-    st.title("智能排班")
+    st.title(f"{SYSTEM_NAME}｜{page}")
     st.caption("先按硬约束筛选，再按“距离优先 + 适度负荷均衡”评分推荐。")
     with db_session() as db:
         tasks = db.query(Task).order_by(Task.id.desc()).all()
@@ -690,7 +697,7 @@ if page == "智能排班":
 
 # -------------------- 页面：批量排班 --------------------
 elif page == "批量排班":
-    st.title("批量排班")
+    st.title(f"{SYSTEM_NAME}｜{page}")
     st.caption("只会处理“未排过”的任务；按 need_expert 优先 > 人数多优先 > 开始日期早 排序。")
     c1, c2, c3 = st.columns([1, 1, 1])
     date_start = c1.date_input("开始日期", value=date.today())
@@ -724,7 +731,7 @@ elif page == "批量排班":
 
 # -------------------- 页面：稽查员管理 --------------------
 elif page == "稽查员管理":
-    st.title("稽查员管理")
+    st.title(f"{SYSTEM_NAME}｜{page}")
     with st.form("auditor_form", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
         name = c1.text_input("姓名*")
@@ -804,7 +811,7 @@ elif page == "稽查员管理":
 
 # -------------------- 页面：任务管理 --------------------
 elif page == "任务管理":
-    st.title("任务管理")
+    st.title(f"{SYSTEM_NAME}｜{page}")
     with st.form("task_form", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
         project_name = c1.text_input("项目名称*")
@@ -881,7 +888,7 @@ elif page == "任务管理":
 
 # -------------------- 页面：城市距离 --------------------
 elif page == "城市距离":
-    st.title("城市距离")
+    st.title(f"{SYSTEM_NAME}｜{page}")
     st.caption("系统会优先读取距离表；若未命中，会尝试按城市坐标自动计算并写回缓存。")
     with st.form("distance_form", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
@@ -919,7 +926,7 @@ elif page == "城市距离":
 
 # -------------------- 页面：城市坐标 --------------------
 elif page == "城市坐标":
-    st.title("城市坐标")
+    st.title(f"{SYSTEM_NAME}｜{page}")
     st.caption("用于自动计算全国城市直线距离；CSV 格式：name,lat,lon。")
     with st.form("city_form", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
@@ -946,8 +953,8 @@ elif page == "城市坐标":
         if not csv_file:
             st.warning("请先上传 CSV 文件。")
         else:
-            text = csv_file.getvalue().decode("utf-8-sig", errors="ignore")
-            reader = csv.reader(io.StringIO(text))
+            text_data = csv_file.getvalue().decode("utf-8-sig", errors="ignore")
+            reader = csv.reader(io.StringIO(text_data))
             imported = 0
             with db_session() as db:
                 for r in reader:
@@ -989,10 +996,9 @@ elif page == "城市坐标":
 
 # -------------------- 页面：模板导入 --------------------
 elif page == "模板导入":
-    st.title("模板导入")
+    st.title(f"{SYSTEM_NAME}｜{page}")
     st.caption("下载模板 → 填写 → 上传导入，支持新增/更新。")
 
-    # 下载：稽查员模板
     headers_a = [
         "姓名",
         "性别(男/女/不限)",
@@ -1214,7 +1220,7 @@ elif page == "模板导入":
 
 # -------------------- 页面：账号管理 --------------------
 elif page == "账号管理":
-    st.title("账号管理")
+    st.title(f"{SYSTEM_NAME}｜{page}")
     current_user = st.session_state.get("login_user", "")
     is_admin = bool(st.session_state.get("is_admin", False))
 
@@ -1303,7 +1309,7 @@ elif page == "账号管理":
 
 # -------------------- 页面：日历视图 --------------------
 elif page == "日历视图":
-    st.title("日历视图")
+    st.title(f"{SYSTEM_NAME}｜{page}")
     st.caption("按月查看排班、节假日标识，并支持导出 ICS 日历。")
     with db_session() as db:
         auditors = db.query(Auditor).order_by(Auditor.name.asc()).all()
@@ -1333,7 +1339,6 @@ elif page == "日历视图":
 
     st.subheader(f"{year}年{month}月 日历总览")
     weeks = []
-    # Monday-first calendar matrix
     first_cell = month_start - timedelta(days=month_start.weekday())
     current = first_cell
     for _ in range(6):
