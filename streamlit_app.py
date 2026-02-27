@@ -271,14 +271,14 @@ def check_login(username: str, password: str) -> bool:
     user = get_auth_user(username)
     if not user:
         return False
-    return str(user.get("password_hash")) == hash_password(str(password))
+    return str(user.get("password_hash")) == Fhash_password(str(password))
 
 
 bootstrap_auth_users_if_needed()
 
 
 def render_login():
-    st.title("审计排班系统")
+    st.title("万宁睿和稽查智能排班系统")
     st.subheader("账号密码登录")
     st.caption("首次使用默认管理员：admin / admin123。登录后可在【账号管理】中新增人员、修改密码。")
     with st.form("login_form", clear_on_submit=False):
@@ -546,7 +546,7 @@ def load_day_marks():
 
 
 # -------------------- 侧边栏 --------------------
-st.sidebar.title("审计排班系统")
+st.sidebar.title("万宁睿和稽查智能排班系统系统")
 st.sidebar.caption(f"当前用户：{st.session_state.get('login_user', '')}")
 if st.sidebar.button("退出登录"):
     st.session_state["logged_in"] = False
