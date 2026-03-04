@@ -769,9 +769,9 @@ elif page == "稽查员管理":
         continuous_days = c10.number_input("连续工作天数", min_value=0, value=0, step=1)
         last_city = c11.text_input("上次结束城市")
         st.markdown("#### 上次结束日期（可空）")
-colx, coly = st.columns([1, 3])
-has_last_date = colx.checkbox("填写上次结束日期", value=False)
-last_date = coly.date_input("上次结束日期", value=date.today(), disabled=(not has_last_date))
+        colx, coly = st.columns([1, 3])
+        has_last_date = colx.checkbox("填写上次结束日期", value=False)
+        last_date = coly.date_input("上次结束日期", value=date.today(), disabled=(not has_last_date))
 
         if st.form_submit_button("新增稽查员", type="primary"):
             if not name.strip() or not base_city.strip():
