@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 import streamlit as st
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 
 from app.db import Base, SessionLocal, engine, ensure_schema
@@ -602,7 +602,18 @@ if page == "智能排班":
     st.caption("先按硬约束筛选，再按“距离优先 + 适度负荷均衡”评分推荐。")
     with db_session() as db:
         tasks = db.query(Task).order_by(Task.id.desc()).all()
-        schedules_recent = db.query(Schedule).order_by(Schedule.id.desc()).limit(120).all()
+        schedules_recent = db.query(Schedule).options(joinedload(Schedule.task), joinedload(Schedule.auditor)).order_by(Schedule.id.desc()).limit(120).all()
+        schedules_recent_rows = []
+        for s in schedules_recent:
+            schedules_recent_rows.append({
+                "ID": s.id,
+                "任务": f"#{s.task_id} {(s.task.project_name if s.task else '')}",
+                "人员": f"#{s.auditor_id} {(s.auditor.name if s.auditor else '')} ({(s.auditor.group_level if s.auditor else '')})",
+                "角色": s.role,
+                "时间": f"{d2s(s.start_date)} ~ {d2s(s.end_date)}",
+                "路线": f"{s.travel_from_city} → {s.travel_to_city}",
+                "km": round(float(s.distance_km or 0), 1),
+            })
 
     if not tasks:
         st.info("请先在【任务管理】中录入任务。")
@@ -689,20 +700,17 @@ if page == "智能排班":
                 show_table(rows, 420)
 
     st.subheader("最近排班记录（TOP120）")
-    rows = []
-    for s in schedules_recent:
-        rows.append(
-            {
-                "ID": s.id,
-                "任务": f"#{s.task_id} {s.task.project_name if s.task else ''}",
-                "人员": f"#{s.auditor_id} {s.auditor.name if s.auditor else ''} ({s.auditor.group_level if s.auditor else ''})",
-                "角色": s.role,
-                "时间": f"{d2s(s.start_date)} ~ {d2s(s.end_date)}",
-                "路线": f"{s.travel_from_city} → {s.travel_to_city}",
-                "km": round(float(s.distance_km or 0), 1),
-            }
-        )
-    show_table(rows, 360)
+    show_table(schedules_recent_rows, 360)
+    if schedules_recent_rows:
+        delete_sid = st.selectbox("删除排班记录（按ID）", [r["ID"] for r in schedules_recent_rows])
+        if st.button("删除所选排班记录"):
+            with db_session() as db:
+                obj = db.query(Schedule).filter(Schedule.id == delete_sid).first()
+                if obj:
+                    db.delete(obj)
+                    db.commit()
+            st.success("已删除")
+            st.rerun()
     if schedules_recent:
         delete_sid = st.selectbox("删除排班记录（按ID）", [s.id for s in schedules_recent])
         if st.button("删除所选排班记录"):
@@ -1336,7 +1344,24 @@ elif page == "日历视图":
     st.caption("按月查看排班、节假日标识，并支持导出 ICS 日历。")
     with db_session() as db:
         auditors = db.query(Auditor).order_by(Auditor.name.asc()).all()
-        all_schedules = db.query(Schedule).order_by(Schedule.start_date.asc()).all()
+        all_schedules = db.query(Schedule).options(joinedload(Schedule.task), joinedload(Schedule.auditor)).order_by(Schedule.start_date.asc()).all()
+        all_schedules_rows = []
+        for s in all_schedules:
+            all_schedules_rows.append({
+                "id": s.id,
+                "auditor_id": s.auditor_id,
+                "auditor_name": (s.auditor.name if s.auditor else ""),
+                "auditor_group": (s.auditor.group_level if s.auditor else ""),
+                "task_id": s.task_id,
+                "project_name": (s.task.project_name if s.task else ""),
+                "site_city": (s.task.site_city if s.task else ""),
+                "role": s.role,
+                "start_date": s.start_date,
+                "end_date": s.end_date,
+                "travel_from_city": s.travel_from_city,
+                "travel_to_city": s.travel_to_city,
+                "distance_km": float(s.distance_km or 0),
+            })
 
     auditor_options = {"全部稽查员": None}
     for a in auditors:
@@ -1352,10 +1377,10 @@ elif page == "日历视图":
     month_end = next_month - timedelta(days=1)
 
     filtered = []
-    for s in all_schedules:
-        if auditor_id and s.auditor_id != auditor_id:
+    for s in all_schedules_rows:
+        if auditor_id and s.get("auditor_id") != auditor_id:
             continue
-        if s.start_date <= month_end and s.end_date >= month_start:
+        if s.get("start_date") <= month_end and s.get("end_date") >= month_start:
             filtered.append(s)
 
     day_marks = {it.get("date"): it for it in load_day_marks() if it.get("date", "")[:7] == month_start.strftime("%Y-%m")}
@@ -1385,9 +1410,9 @@ elif page == "日历视图":
                 marks.append(mk.get("label") or mk.get("type") or "标记")
             evs = []
             for s in filtered:
-                if s.start_date <= day <= s.end_date:
-                    proj = s.task.project_name if s.task else f"任务#{s.task_id}"
-                    person = s.auditor.name if s.auditor else f"稽查员#{s.auditor_id}"
+                if s.get("start_date") <= day <= s.get("end_date"):
+                    proj = s.get("project_name") or f"任务#{s.get('task_id')}"
+                    person = s.get("auditor_name") or f"稽查员#{s.get('auditor_id')}"
                     evs.append(f"{proj}｜{person}")
             color = "#ffffff"
             if day.month != month:
@@ -1410,14 +1435,14 @@ elif page == "日历视图":
     for s in filtered:
         rows.append(
             {
-                "ID": s.id,
-                "项目": s.task.project_name if s.task else "",
-                "城市": s.task.site_city if s.task else "",
-                "角色": "组长" if s.role == "leader" else "成员",
-                "稽查员": s.auditor.name if s.auditor else "",
-                "时间": f"{d2s(s.start_date)} ~ {d2s(s.end_date)}",
-                "路线": f"{s.travel_from_city} → {s.travel_to_city}",
-                "距离(km)": round(float(s.distance_km or 0), 1),
+                "ID": s.get("id"),
+                "项目": s.get("project_name") or "",
+                "城市": s.get("site_city") or "",
+                "角色": "组长" if s.get("role") == "leader" else "成员",
+                "稽查员": s.get("auditor_name") or "",
+                "时间": f"{d2s(s.get('start_date'))} ~ {d2s(s.get('end_date'))}",
+                "路线": f"{s.get('travel_from_city')} → {s.get('travel_to_city')}",
+                "距离(km)": round(float(s.get('distance_km') or 0), 1),
             }
         )
     show_table(rows, 320)
