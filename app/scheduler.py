@@ -5,7 +5,7 @@ from typing import List, Tuple, Optional
 import re
 from sqlalchemy.orm import Session
 from .config import GAP_THRESHOLD_DAYS, CHAIN_GAP_DAYS, CHAIN_DISTANCE_KM, CHAIN_BONUS, EXPERT_MEMBERS_MUST_BE_A, TRAVEL_BUFFER_DAYS, DEFAULT_DISTANCE_KM, EXPERT_PREFERENCE_BONUS, DIST_PENALTY_DIVISOR, NEAR_BONUS_0_100, NEAR_BONUS_100_300, NEAR_BONUS_300_800, NEAR_BONUS_GT_800, LOAD_PENALTY_FACTOR, AUTO_DISTANCE_BY_GEO, FALLBACK_TO_DEFAULT_DISTANCE_IF_NO_GEO
-from .models import CityDistance
+from .models import CityDistance, City
 
 def overlaps(a_start: date, a_end: date, b_start: date, b_end: date) -> bool:
     return not (a_end < b_start or b_end < a_start)
