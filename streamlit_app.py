@@ -108,7 +108,6 @@ with db_session() as db:
     seed_cities_if_needed(db)
 
 
-
 # -------------------- 登录认证（数据库持久化） --------------------
 def hash_password(password: str) -> str:
     return hashlib.sha256(str(password).encode("utf-8")).hexdigest()
@@ -367,7 +366,6 @@ def find_idx(headers, aliases: list[str]) -> Optional[int]:
     return None
 
 
-
 def build_excel_bytes(headers: list[str], rows: list[list]):
     """简单导出 Excel（不依赖 pandas）"""
     from openpyxl import Workbook
@@ -386,6 +384,7 @@ def build_excel_bytes(headers: list[str], rows: list[list]):
     wb.save(bio)
     bio.seek(0)
     return bio
+
 
 # -------------------- 工具函数：ICS --------------------
 def ics_escape(s: str) -> str:
@@ -518,7 +517,7 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
                 obj = team_objective(cand_team, auditor_lookup, avg_cases, report["batch_week_counts"])
                 if best_obj is None or obj < best_obj:
                     best_obj, best_team = obj, cand_team
-                extras = member_pool[need_n : need_n + 6]
+                extras = member_pool[need_n: need_n + 6]
                 for ex in extras:
                     trial_members = base_members[:-1] + [ex] if base_members else [ex]
                     cand_team2 = TeamProposal(
@@ -570,11 +569,12 @@ def load_day_marks():
 # -------------------- 侧边栏 --------------------
 st.sidebar.title(APP_NAME)
 st.sidebar.caption(f"当前用户：{st.session_state.get('login_user', '')}")
-if st.sidebar.button("退出登录"):
+if st.sidebar.button("退出登录", key="logout_btn"):
     st.session_state["logged_in"] = False
     st.session_state["is_admin"] = False
     st.session_state.pop("login_user", None)
     st.rerun()
+
 page = st.sidebar.radio(
     "功能导航",
     [
@@ -588,6 +588,7 @@ page = st.sidebar.radio(
         "日历视图",
         "账号管理",
     ],
+    key="sidebar_page_radio",
 )
 
 st.sidebar.caption("纯 Streamlit 版本：已去除 iframe / 127.0.0.1 依赖，可直接分享给同事使用。")
@@ -619,10 +620,10 @@ if page == "智能排班":
         st.info("请先在【任务管理】中录入任务。")
     else:
         task_options = {f"#{t.id} {t.project_name}｜{t.site_city}｜{d2s(t.start_date)}｜{t.required_days}天｜{t.required_headcount}人": t.id for t in tasks}
-        selected_label = st.selectbox("选择任务", list(task_options.keys()))
+        selected_label = st.selectbox("选择任务", list(task_options.keys()), key="smart_select_task")
         selected_task_id = task_options[selected_label]
         col_a, col_b = st.columns([1, 3])
-        if col_a.button("生成推荐", type="primary"):
+        if col_a.button("生成推荐", type="primary", key="smart_gen_reco_btn"):
             with db_session() as db:
                 task = db.query(Task).filter(Task.id == selected_task_id).first()
                 auditors = db.query(Auditor).all()
@@ -663,8 +664,8 @@ if page == "智能排班":
                     st.write("**组员：** 无")
                 st.caption(f"{team.notes}｜团队评分 {team.team_score}")
                 default_member_ids = ",".join([str(m.auditor_id) for m in team.members])
-                member_ids_text = st.text_input("确认指派前，可手工调整组员ID（逗号分隔）", value=default_member_ids)
-                if st.button("确认指派", type="primary"):
+                member_ids_text = st.text_input("确认指派前，可手工调整组员ID（逗号分隔）", value=default_member_ids, key="smart_member_ids_text")
+                if st.button("确认指派", type="primary", key="smart_confirm_assign_btn"):
                     ids = [x for x in re.split(r"[，,\s]+", member_ids_text.strip()) if x.strip()]
                     member_ids = []
                     for x in ids:
@@ -701,21 +702,17 @@ if page == "智能排班":
 
     st.subheader("最近排班记录（TOP120）")
     show_table(schedules_recent_rows, 360)
+
+    # ✅ 最终修复：只保留一套删除控件（避免 StreamlitDuplicateElementId）
     if schedules_recent_rows:
-        delete_sid = st.selectbox("删除排班记录（按ID）", [r["ID"] for r in schedules_recent_rows])
-        if st.button("删除所选排班记录"):
+        delete_sid = st.selectbox(
+            "删除排班记录（按ID）",
+            [r["ID"] for r in schedules_recent_rows],
+            key="delete_schedule_selectbox_recent",
+        )
+        if st.button("删除所选排班记录", key="delete_schedule_btn_recent"):
             with db_session() as db:
-                obj = db.query(Schedule).filter(Schedule.id == delete_sid).first()
-                if obj:
-                    db.delete(obj)
-                    db.commit()
-            st.success("已删除")
-            st.rerun()
-    if schedules_recent:
-        delete_sid = st.selectbox("删除排班记录（按ID）", [s.id for s in schedules_recent])
-        if st.button("删除所选排班记录"):
-            with db_session() as db:
-                obj = db.query(Schedule).filter(Schedule.id == delete_sid).first()
+                obj = db.query(Schedule).filter(Schedule.id == int(delete_sid)).first()
                 if obj:
                     db.delete(obj)
                     db.commit()
@@ -727,10 +724,15 @@ elif page == "批量排班":
     st.subheader("批量排班")
     st.caption("只会处理“未排过”的任务；按 need_expert 优先 > 人数多优先 > 开始日期早 排序。")
     c1, c2, c3 = st.columns([1, 1, 1])
-    date_start = c1.date_input("开始日期", value=date.today())
-    date_end = c2.date_input("结束日期", value=date.today() + timedelta(days=30))
-    mode = c3.selectbox("模式", ["greedy", "optimized"], format_func=lambda x: "快速模式（优先效率）" if x == "greedy" else "优化模式（优先成本与均衡）")
-    if st.button("开始批量排班", type="primary"):
+    date_start = c1.date_input("开始日期", value=date.today(), key="batch_start_date")
+    date_end = c2.date_input("结束日期", value=date.today() + timedelta(days=30), key="batch_end_date")
+    mode = c3.selectbox(
+        "模式",
+        ["greedy", "optimized"],
+        format_func=lambda x: "快速模式（优先效率）" if x == "greedy" else "优化模式（优先成本与均衡）",
+        key="batch_mode",
+    )
+    if st.button("开始批量排班", type="primary", key="batch_run_btn"):
         with db_session() as db:
             report = run_batch_schedule(db, date_start, date_end, mode)
         st.session_state["batch_report"] = report
@@ -826,10 +828,15 @@ elif page == "稽查员管理":
         )
     show_table(rows)
     if auditors:
-        delete_id = st.selectbox("删除稽查员（按ID）", [a.id for a in auditors], format_func=lambda x: f"{x} - {next(a.name for a in auditors if a.id == x)}")
-        if st.button("删除所选稽查员"):
+        delete_id = st.selectbox(
+            "删除稽查员（按ID）",
+            [a.id for a in auditors],
+            format_func=lambda x: f"{x} - {next(a.name for a in auditors if a.id == x)}",
+            key="delete_auditor_selectbox",
+        )
+        if st.button("删除所选稽查员", key="delete_auditor_btn"):
             with db_session() as db:
-                obj = db.query(Auditor).filter(Auditor.id == delete_id).first()
+                obj = db.query(Auditor).filter(Auditor.id == int(delete_id)).first()
                 if obj:
                     db.delete(obj)
                     db.commit()
@@ -906,10 +913,15 @@ elif page == "任务管理":
         )
     show_table(rows)
     if tasks:
-        delete_id = st.selectbox("删除任务（按ID）", [t.id for t in tasks], format_func=lambda x: f"{x} - {next(t.project_name for t in tasks if t.id == x)}")
-        if st.button("删除所选任务"):
+        delete_id = st.selectbox(
+            "删除任务（按ID）",
+            [t.id for t in tasks],
+            format_func=lambda x: f"{x} - {next(t.project_name for t in tasks if t.id == x)}",
+            key="delete_task_selectbox",
+        )
+        if st.button("删除所选任务", key="delete_task_btn"):
             with db_session() as db:
-                obj = db.query(Task).filter(Task.id == delete_id).first()
+                obj = db.query(Task).filter(Task.id == int(delete_id)).first()
                 if obj:
                     db.delete(obj)
                     db.commit()
@@ -944,10 +956,10 @@ elif page == "城市距离":
     rows = [{"ID": d.id, "from": d.from_city, "to": d.to_city, "km": round(float(d.km or 0), 1)} for d in dists]
     show_table(rows)
     if dists:
-        delete_id = st.selectbox("删除距离记录（按ID）", [d.id for d in dists])
-        if st.button("删除所选距离记录"):
+        delete_id = st.selectbox("删除距离记录（按ID）", [d.id for d in dists], key="delete_distance_selectbox")
+        if st.button("删除所选距离记录", key="delete_distance_btn"):
             with db_session() as db:
-                obj = db.query(CityDistance).filter(CityDistance.id == delete_id).first()
+                obj = db.query(CityDistance).filter(CityDistance.id == int(delete_id)).first()
                 if obj:
                     db.delete(obj)
                     db.commit()
@@ -979,12 +991,12 @@ elif page == "城市坐标":
                 st.rerun()
 
     csv_file = st.file_uploader("批量导入城市坐标 CSV", type=["csv"], key="city_csv")
-    if st.button("执行 CSV 导入"):
+    if st.button("执行 CSV 导入", key="city_csv_import_btn"):
         if not csv_file:
             st.warning("请先上传 CSV 文件。")
         else:
-            text = csv_file.getvalue().decode("utf-8-sig", errors="ignore")
-            reader = csv.reader(io.StringIO(text))
+            text_content = csv_file.getvalue().decode("utf-8-sig", errors="ignore")
+            reader = csv.reader(io.StringIO(text_content))
             imported = 0
             with db_session() as db:
                 for r in reader:
@@ -1014,10 +1026,10 @@ elif page == "城市坐标":
     rows = [{"ID": c.id, "城市": c.name, "lat": round(float(c.lat), 6), "lon": round(float(c.lon), 6)} for c in cities]
     show_table(rows)
     if cities:
-        delete_id = st.selectbox("删除城市（按ID）", [c.id for c in cities])
-        if st.button("删除所选城市"):
+        delete_id = st.selectbox("删除城市（按ID）", [c.id for c in cities], key="delete_city_selectbox")
+        if st.button("删除所选城市", key="delete_city_btn"):
             with db_session() as db:
-                obj = db.query(City).filter(City.id == delete_id).first()
+                obj = db.query(City).filter(City.id == int(delete_id)).first()
                 if obj:
                     db.delete(obj)
                     db.commit()
@@ -1029,7 +1041,6 @@ elif page == "模板导入":
     st.subheader("模板导入")
     st.caption("下载模板 → 填写 → 上传导入，支持新增/更新。")
 
-    # 下载：稽查员模板
     headers_a = [
         "姓名",
         "性别(男/女/不限)",
@@ -1075,7 +1086,7 @@ elif page == "模板导入":
 
     st.divider()
     auditor_xlsx = st.file_uploader("上传稽查员模板", type=["xlsx"], key="auditor_xlsx")
-    if st.button("导入稽查员模板"):
+    if st.button("导入稽查员模板", key="import_auditor_xlsx_btn"):
         if not auditor_xlsx:
             st.warning("请先上传稽查员模板。")
         else:
@@ -1162,7 +1173,7 @@ elif page == "模板导入":
 
     st.divider()
     task_xlsx = st.file_uploader("上传任务模板", type=["xlsx"], key="task_xlsx")
-    if st.button("导入任务模板"):
+    if st.button("导入任务模板", key="import_task_xlsx_btn"):
         if not task_xlsx:
             st.warning("请先上传任务模板。")
         else:
@@ -1282,7 +1293,7 @@ elif page == "账号管理":
             c1, c2, c3 = st.columns(3)
             new_username = c1.text_input("新账号")
             new_password = c2.text_input("初始密码（至少6位）", type="password")
-            new_is_admin = c3.selectbox("权限", ["普通用户", "管理员"])
+            new_is_admin = c3.selectbox("权限", ["普通用户", "管理员"], key="create_user_role")
             if st.form_submit_button("新增账号", type="primary"):
                 ok, msg = create_auth_user(new_username, new_password, is_admin=(new_is_admin == "管理员"))
                 if ok:
@@ -1311,7 +1322,7 @@ elif page == "账号管理":
         if user_labels:
             with st.form("reset_password_form", clear_on_submit=True):
                 c1, c2 = st.columns(2)
-                reset_user = c1.selectbox("选择账号", user_labels)
+                reset_user = c1.selectbox("选择账号", user_labels, key="reset_user_select")
                 reset_pw = c2.text_input("新密码（至少6位）", type="password")
                 if st.form_submit_button("重置密码"):
                     ok, msg = update_auth_password(reset_user, reset_pw)
@@ -1324,7 +1335,7 @@ elif page == "账号管理":
             deletable = [u for u in user_labels if u not in ("admin", current_user)]
             if deletable:
                 with st.form("delete_user_form", clear_on_submit=True):
-                    del_user = st.selectbox("选择要删除的账号", deletable)
+                    del_user = st.selectbox("选择要删除的账号", deletable, key="delete_user_select")
                     confirm_text = st.text_input("输入 DELETE 确认删除")
                     if st.form_submit_button("删除账号"):
                         if confirm_text != "DELETE":
@@ -1367,9 +1378,9 @@ elif page == "日历视图":
     for a in auditors:
         auditor_options[f"#{a.id} {a.name}"] = a.id
     c1, c2, c3 = st.columns(3)
-    auditor_label = c1.selectbox("筛选稽查员", list(auditor_options.keys()))
-    year = c2.selectbox("年份", list(range(date.today().year - 2, date.today().year + 3)), index=2)
-    month = c3.selectbox("月份", list(range(1, 13)), index=date.today().month - 1)
+    auditor_label = c1.selectbox("筛选稽查员", list(auditor_options.keys()), key="cal_auditor_filter")
+    year = c2.selectbox("年份", list(range(date.today().year - 2, date.today().year + 3)), index=2, key="cal_year")
+    month = c3.selectbox("月份", list(range(1, 13)), index=date.today().month - 1, key="cal_month")
     auditor_id = auditor_options[auditor_label]
 
     month_start = date(int(year), int(month), 1)
@@ -1387,7 +1398,6 @@ elif page == "日历视图":
 
     st.subheader(f"{year}年{month}月 日历总览")
     weeks = []
-    # Monday-first calendar matrix
     first_cell = month_start - timedelta(days=month_start.weekday())
     current = first_cell
     for _ in range(6):
@@ -1456,11 +1466,12 @@ elif page == "日历视图":
             "导出本月排班明细（Excel）",
             bio.getvalue(),
             file_name=f"{APP_NAME}_{year}-{int(month):02d}_排班明细.xlsx",
+            key="export_month_excel_btn",
         )
 
     with db_session() as db:
         all_ics = build_ics_events(db)
-        st.download_button("导出全部 ICS 日历", all_ics, file_name="wnrh_all.ics")
+        st.download_button("导出全部 ICS 日历", all_ics, file_name="wnrh_all.ics", key="export_all_ics_btn")
         if auditor_id:
             one_ics = build_ics_events(db, auditor_id=auditor_id)
-            st.download_button("导出当前稽查员 ICS 日历", one_ics, file_name=f"wnrh_auditor_{auditor_id}.ics")
+            st.download_button("导出当前稽查员 ICS 日历", one_ics, file_name=f"wnrh_auditor_{auditor_id}.ics", key="export_one_ics_btn")
