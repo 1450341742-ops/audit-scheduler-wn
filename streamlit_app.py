@@ -851,9 +851,9 @@ elif page == "任务管理":
         preferred = c9.text_input("软指定专家/老师（可空）")
         start_date = c10.date_input("开始日期", value=date.today())
         st.markdown("#### 结束日期（可空）")
-colx, coly = st.columns([1, 3])
-has_end_date = colx.checkbox("填写结束日期", value=False)
-end_date = coly.date_input("结束日期", value=start_date, disabled=(not has_end_date))
+        colx, coly = st.columns([1, 3])
+        has_end_date = colx.checkbox("填写结束日期", value=False)
+        end_date = coly.date_input("结束日期", value=start_date, disabled=(not has_end_date))
 
         if st.form_submit_button("新增任务", type="primary"):
             if not project_name.strip() or not site_city.strip():
