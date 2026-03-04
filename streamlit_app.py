@@ -768,10 +768,7 @@ elif page == "稽查员管理":
         travel_days = c9.number_input("本月差旅天数", min_value=0, value=0, step=1)
         continuous_days = c10.number_input("连续工作天数", min_value=0, value=0, step=1)
         last_city = c11.text_input("上次结束城市")
-        st.markdown("#### 上次结束日期（可空）")
-        colx, coly = st.columns([1, 3])
-        has_last_date = colx.checkbox("填写上次结束日期", value=False)
-        last_date = coly.date_input("上次结束日期", value=date.today(), disabled=(not has_last_date))
+        last_date = c12.date_input("上次结束日期*", value=date.today())
 
         if st.form_submit_button("新增稽查员", type="primary"):
             if not name.strip() or not base_city.strip():
@@ -791,7 +788,7 @@ elif page == "稽查员管理":
                             travel_days=int(travel_days),
                             continuous_days=int(continuous_days),
                             last_task_end_city=last_city.strip() or None,
-                            last_task_end_date=last_date if has_last_date else None,
+                            last_task_end_date=last_date,
                         )
                     )
                     db.commit()
@@ -850,14 +847,14 @@ elif page == "任务管理":
         specified = c8.text_input("硬指定人员（可空）")
         preferred = c9.text_input("软指定专家/老师（可空）")
         start_date = c10.date_input("开始日期", value=date.today())
-        st.markdown("#### 结束日期（可空）")
-        colx, coly = st.columns([1, 3])
-        has_end_date = colx.checkbox("填写结束日期", value=False)
-        end_date = coly.date_input("结束日期", value=start_date, disabled=(not has_end_date))
+        default_end = start_date + timedelta(days=max(1, int(required_days)) - 1)
+        end_date = st.date_input("结束日期*", value=default_end)
 
         if st.form_submit_button("新增任务", type="primary"):
             if not project_name.strip() or not site_city.strip():
                 st.error("项目名称、中心城市必填。")
+            elif end_date < start_date:
+                st.error("结束日期不能早于开始日期。")
             else:
                 with db_session() as db:
                     db.add(
@@ -872,7 +869,7 @@ elif page == "任务管理":
                             preferred_experts=preferred.strip() or None,
                             site_city=site_city.strip(),
                             start_date=start_date,
-                            end_date=end_date if has_end_date else None,
+                            end_date=end_date,
                         )
                     )
                     db.commit()
