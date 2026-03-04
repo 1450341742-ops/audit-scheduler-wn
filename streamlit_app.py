@@ -25,17 +25,11 @@ from app.scheduler import (
 from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 
 
-# =========================
-# 全局品牌与配置
-# =========================
 APP_NAME = "万宁睿和稽查排班"
 
 st.set_page_config(page_title=APP_NAME, layout="wide")
 
-
-# =========================
-# 初始化数据库
-# =========================
+# -------------------- 初始化 --------------------
 Base.metadata.create_all(bind=engine)
 ensure_schema()
 
@@ -74,9 +68,6 @@ def show_table(rows: list[dict], height: int = 380):
     st.dataframe(rows, use_container_width=True, height=height)
 
 
-# =========================
-# 数据预置：城市距离 / 城市坐标
-# =========================
 def seed_city_distances_if_needed(db: Session):
     seen = set()
     for a, b, km in SEED_CITY_DISTANCES:
@@ -88,11 +79,7 @@ def seed_city_distances_if_needed(db: Session):
         if key in seen:
             continue
         seen.add(key)
-        exists = (
-            db.query(CityDistance)
-            .filter(CityDistance.from_city == a, CityDistance.to_city == b)
-            .first()
-        )
+        exists = db.query(CityDistance).filter(CityDistance.from_city == a, CityDistance.to_city == b).first()
         if exists:
             continue
         db.add(CityDistance(from_city=a, to_city=b, km=float(km)))
@@ -121,9 +108,8 @@ with db_session() as db:
     seed_cities_if_needed(db)
 
 
-# =========================
-# 登录认证（数据库持久化）
-# =========================
+
+# -------------------- 登录认证（数据库持久化） --------------------
 def hash_password(password: str) -> str:
     return hashlib.sha256(str(password).encode("utf-8")).hexdigest()
 
@@ -152,7 +138,6 @@ def _bootstrap_seed_users() -> dict[str, str]:
             users = {str(k): str(v) for k, v in dict(secret_users).items()}
     except Exception:
         pass
-
     if not users:
         env_json = os.environ.get("AUTH_USERS_JSON", "").strip()
         if env_json:
@@ -162,7 +147,6 @@ def _bootstrap_seed_users() -> dict[str, str]:
                     users = {str(k): str(v) for k, v in data.items()}
             except Exception:
                 pass
-
     if not users:
         users = {"admin": "admin123"}
     return users
@@ -263,7 +247,9 @@ def update_auth_password(username: str, new_password: str) -> tuple[bool, str]:
         return False, "账号不存在"
     with engine.begin() as conn:
         conn.execute(
-            text("UPDATE auth_users SET password_hash = :password_hash WHERE username = :username"),
+            text(
+                "UPDATE auth_users SET password_hash = :password_hash WHERE username = :username"
+            ),
             {"username": clean_user, "password_hash": hash_password(new_password)},
         )
     return True, "密码修改成功"
@@ -294,7 +280,7 @@ bootstrap_auth_users_if_needed()
 
 
 def render_login():
-    st.title(APP_NAME)
+    st.title("审计排班系统")
     st.subheader("账号密码登录")
     st.caption("首次使用默认管理员：admin / admin123。登录后可在【账号管理】中新增人员、修改密码。")
     with st.form("login_form", clear_on_submit=False):
@@ -322,18 +308,13 @@ if "is_admin" not in st.session_state:
 if not st.session_state["logged_in"]:
     render_login()
 
-
-# =========================
-# 常量
-# =========================
+# -------------------- 常量 --------------------
 STATUS_MAP = {"在岗": "active", "请假": "leave", "冻结": "frozen"}
 STATUS_MAP_REV = {v: k for k, v in STATUS_MAP.items()}
 BOOL_TRUE = {"是", "Y", "y", "yes", "YES", "True", "true", "1", "是/yes"}
 
 
-# =========================
-# 工具：模板/导入
-# =========================
+# -------------------- 工具函数：模板/导入 --------------------
 def make_xlsx_template(headers, example_rows, sheet_name="template"):
     from openpyxl import Workbook
 
@@ -346,7 +327,7 @@ def make_xlsx_template(headers, example_rows, sheet_name="template"):
     for i, h in enumerate(headers, start=1):
         col_letter = chr(64 + i) if i <= 26 else None
         if col_letter:
-            ws.column_dimensions[col_letter].width = max(12, min(36, len(str(h)) * 2))
+            ws.column_dimensions[col_letter].width = max(12, min(30, len(str(h)) * 2))
     bio = io.BytesIO()
     wb.save(bio)
     bio.seek(0)
@@ -386,9 +367,27 @@ def find_idx(headers, aliases: list[str]) -> Optional[int]:
     return None
 
 
-# =========================
-# 工具：ICS
-# =========================
+
+def build_excel_bytes(headers: list[str], rows: list[list]):
+    """简单导出 Excel（不依赖 pandas）"""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "sheet1"
+    ws.append(headers)
+    for r in rows:
+        ws.append(r)
+    for i, h in enumerate(headers, start=1):
+        col_letter = chr(64 + i) if i <= 26 else None
+        if col_letter:
+            ws.column_dimensions[col_letter].width = max(12, min(40, len(str(h)) * 2))
+    bio = io.BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio
+
+# -------------------- 工具函数：ICS --------------------
 def ics_escape(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
 
@@ -413,61 +412,32 @@ def build_ics_events(db: Session, auditor_id: int | None = None):
         uid = f"wnrh-{s.id}@scheduler"
         summary = f"{t.project_name}｜{t.site_city}｜{s.role}"
         desc = f"客户:{t.customer_name or ''}\n人数:{t.required_headcount} 天数:{t.required_days}\n负责人/成员:{a.name}"
-        events.extend(
-            [
-                "BEGIN:VEVENT",
-                f"UID:{uid}",
-                f"DTSTAMP:{now}",
-                f"DTSTART:{start.strftime('%Y%m%dT%H%M%S')}",
-                f"DTEND:{end_exclusive.strftime('%Y%m%dT%H%M%S')}",
-                f"SUMMARY:{ics_escape(summary)}",
-                f"DESCRIPTION:{ics_escape(desc)}",
-                "END:VEVENT",
-            ]
-        )
+        events.extend([
+            "BEGIN:VEVENT",
+            f"UID:{uid}",
+            f"DTSTAMP:{now}",
+            f"DTSTART:{start.strftime('%Y%m%dT%H%M%S')}",
+            f"DTEND:{end_exclusive.strftime('%Y%m%dT%H%M%S')}",
+            f"SUMMARY:{ics_escape(summary)}",
+            f"DESCRIPTION:{ics_escape(desc)}",
+            "END:VEVENT",
+        ])
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
         "PRODID:-//WNRH Scheduler//CN",
         "CALSCALE:GREGORIAN",
-        f"X-WR-CALNAME:{APP_NAME}",
+        "X-WR-CALNAME:万宁睿和排班",
         *events,
         "END:VCALENDAR",
     ]
     return "\r\n".join(lines).encode("utf-8")
 
 
-# =========================
-# 工具：Excel 导出
-# =========================
-def make_excel_bytes(headers: list[str], rows: list[list], sheet_name: str = "sheet"):
-    from openpyxl import Workbook
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = sheet_name[:31]
-    ws.append(headers)
-    for r in rows:
-        ws.append(r)
-
-    # 简单美化：列宽
-    for i, h in enumerate(headers, start=1):
-        col_letter = chr(64 + i) if i <= 26 else None
-        if col_letter:
-            ws.column_dimensions[col_letter].width = max(12, min(40, len(str(h)) * 2))
-
-    bio = io.BytesIO()
-    wb.save(bio)
-    bio.seek(0)
-    return bio.getvalue()
-
-
-# =========================
-# 工具：业务
-# =========================
+# -------------------- 工具函数：业务 --------------------
 def assign_team_to_task(db: Session, task: Task, leader_id: int, member_ids: list[int]):
     start_date = task.start_date
-    end_date = task.end_date or (task.start_date + timedelta(days=max(1, int(task.required_days or 1)) - 1))
+    end_date = (task.end_date or (task.start_date + timedelta(days=max(1, int(task.required_days or 1)) - 1)))
 
     def add_schedule(auditor_id: int, role: str):
         auditor = db.query(Auditor).filter(Auditor.id == auditor_id).first()
@@ -511,7 +481,6 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
     tasks.sort(key=lambda t: (0 if t.need_expert else 1, -int(t.required_headcount or 1), t.start_date))
     auditors = db.query(Auditor).all()
     report = {"assigned": [], "skipped": [], "batch_week_counts": {}}
-
     for t in tasks:
         schedules_all = db.query(Schedule).all()
         candidates = build_candidates(db, t, auditors, schedules_all)
@@ -531,18 +500,15 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
                 member_pool = [c for c in member_pool_all if c.auditor_id != leader.auditor_id]
                 need_n = max(0, int(t.required_headcount or 1) - 1)
                 from app.scheduler import TeamProposal
-
                 if need_n == 0:
                     cand_team = TeamProposal(leader=leader, members=[], team_score=leader.score, notes="optimized-single")
                     obj = team_objective(cand_team, auditor_lookup, avg_cases, report["batch_week_counts"])
                     if best_obj is None or obj < best_obj:
                         best_obj, best_team = obj, cand_team
                     continue
-
                 base_members = member_pool[:need_n]
                 if len(base_members) < need_n:
                     continue
-
                 cand_team = TeamProposal(
                     leader=leader,
                     members=base_members,
@@ -552,7 +518,6 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
                 obj = team_objective(cand_team, auditor_lookup, avg_cases, report["batch_week_counts"])
                 if best_obj is None or obj < best_obj:
                     best_obj, best_team = obj, cand_team
-
                 extras = member_pool[need_n : need_n + 6]
                 for ex in extras:
                     trial_members = base_members[:-1] + [ex] if base_members else [ex]
@@ -565,7 +530,6 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
                     obj2 = team_objective(cand_team2, auditor_lookup, avg_cases, report["batch_week_counts"])
                     if best_obj is None or obj2 < best_obj:
                         best_obj, best_team = obj2, cand_team2
-
             if best_team:
                 team = best_team
 
@@ -579,11 +543,14 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
         for aid in [leader_id] + member_ids:
             report["batch_week_counts"][aid] = int(report["batch_week_counts"].get(aid, 0)) + 1
         db.commit()
-
         report["assigned"].append(
-            {"task_id": t.id, "project": t.project_name, "leader": team.leader.auditor_name, "members": [m.auditor_name for m in team.members]}
+            {
+                "task_id": t.id,
+                "project": t.project_name,
+                "leader": team.leader.auditor_name,
+                "members": [m.auditor_name for m in team.members],
+            }
         )
-
     return report
 
 
@@ -600,18 +567,14 @@ def load_day_marks():
     return []
 
 
-# =========================
-# 侧边栏 + 导航
-# =========================
+# -------------------- 侧边栏 --------------------
 st.sidebar.title(APP_NAME)
 st.sidebar.caption(f"当前用户：{st.session_state.get('login_user', '')}")
-
 if st.sidebar.button("退出登录"):
     st.session_state["logged_in"] = False
     st.session_state["is_admin"] = False
     st.session_state.pop("login_user", None)
     st.rerun()
-
 page = st.sidebar.radio(
     "功能导航",
     [
@@ -628,20 +591,15 @@ page = st.sidebar.radio(
 )
 
 st.sidebar.caption("纯 Streamlit 版本：已去除 iframe / 127.0.0.1 依赖，可直接分享给同事使用。")
+st.sidebar.caption(f"当前位置：{page}")
 
-
-# =========================
-# 统一右侧顶部标题（随导航变化）
-# =========================
+# 右侧最上方标题：随导航变化
 st.title(f"{APP_NAME}｜{page}")
 
-
-# =========================
-# 页面：智能排班
-# =========================
+# -------------------- 页面：智能排班 --------------------
 if page == "智能排班":
+    st.subheader("智能排班")
     st.caption("先按硬约束筛选，再按“距离优先 + 适度负荷均衡”评分推荐。")
-
     with db_session() as db:
         tasks = db.query(Task).order_by(Task.id.desc()).all()
         schedules_recent = db.query(Schedule).order_by(Schedule.id.desc()).limit(120).all()
@@ -649,14 +607,11 @@ if page == "智能排班":
     if not tasks:
         st.info("请先在【任务管理】中录入任务。")
     else:
-        task_options = {
-            f"#{t.id} {t.project_name}｜{t.site_city}｜{d2s(t.start_date)}｜{t.required_days}天｜{t.required_headcount}人": t.id
-            for t in tasks
-        }
+        task_options = {f"#{t.id} {t.project_name}｜{t.site_city}｜{d2s(t.start_date)}｜{t.required_days}天｜{t.required_headcount}人": t.id for t in tasks}
         selected_label = st.selectbox("选择任务", list(task_options.keys()))
         selected_task_id = task_options[selected_label]
-
-        if st.button("生成推荐", type="primary"):
+        col_a, col_b = st.columns([1, 3])
+        if col_a.button("生成推荐", type="primary"):
             with db_session() as db:
                 task = db.query(Task).filter(Task.id == selected_task_id).first()
                 auditors = db.query(Auditor).all()
@@ -667,9 +622,7 @@ if page == "智能排班":
                     "task_id": selected_task_id,
                     "candidates": candidates[:25],
                     "team": team,
-                    "error": None
-                    if team
-                    else "无可用团队方案：检查负责人/专家A组/人数不足/指定人冲突/每周上限/缓冲日冲突等。",
+                    "error": None if team else "无可用团队方案：检查负责人/专家A组/人数不足/指定人冲突/每周上限/缓冲日冲突等。",
                 }
             st.rerun()
 
@@ -677,14 +630,11 @@ if page == "智能排班":
         if rec and rec.get("task_id") == selected_task_id:
             with db_session() as db:
                 task = db.query(Task).filter(Task.id == selected_task_id).first()
-
             st.info(
                 f"已选择：{task.project_name}（{task.site_city}，{d2s(task.start_date)}，{task.required_days}天，{task.required_headcount}人；需要A带队：{'是' if task.need_expert else '否'}）"
             )
-
             if rec.get("error"):
                 st.error(rec["error"])
-
             team = rec.get("team")
             if team:
                 st.subheader("系统推荐团队方案")
@@ -700,12 +650,9 @@ if page == "智能排班":
                     )
                 else:
                     st.write("**组员：** 无")
-
                 st.caption(f"{team.notes}｜团队评分 {team.team_score}")
-
                 default_member_ids = ",".join([str(m.auditor_id) for m in team.members])
                 member_ids_text = st.text_input("确认指派前，可手工调整组员ID（逗号分隔）", value=default_member_ids)
-
                 if st.button("确认指派", type="primary"):
                     ids = [x for x in re.split(r"[，,\s]+", member_ids_text.strip()) if x.strip()]
                     member_ids = []
@@ -756,7 +703,6 @@ if page == "智能排班":
             }
         )
     show_table(rows, 360)
-
     if schedules_recent:
         delete_sid = st.selectbox("删除排班记录（按ID）", [s.id for s in schedules_recent])
         if st.button("删除所选排班记录"):
@@ -768,22 +714,14 @@ if page == "智能排班":
             st.success("已删除")
             st.rerun()
 
-
-# =========================
-# 页面：批量排班
-# =========================
+# -------------------- 页面：批量排班 --------------------
 elif page == "批量排班":
+    st.subheader("批量排班")
     st.caption("只会处理“未排过”的任务；按 need_expert 优先 > 人数多优先 > 开始日期早 排序。")
-
     c1, c2, c3 = st.columns([1, 1, 1])
     date_start = c1.date_input("开始日期", value=date.today())
     date_end = c2.date_input("结束日期", value=date.today() + timedelta(days=30))
-    mode = c3.selectbox(
-        "模式",
-        ["greedy", "optimized"],
-        format_func=lambda x: "快速模式（优先效率）" if x == "greedy" else "优化模式（优先成本与均衡）",
-    )
-
+    mode = c3.selectbox("模式", ["greedy", "optimized"], format_func=lambda x: "快速模式（优先效率）" if x == "greedy" else "优化模式（优先成本与均衡）")
     if st.button("开始批量排班", type="primary"):
         with db_session() as db:
             report = run_batch_schedule(db, date_start, date_end, mode)
@@ -810,19 +748,15 @@ elif page == "批量排班":
             else:
                 st.info("无")
 
-
-# =========================
-# 页面：稽查员管理
-# =========================
+# -------------------- 页面：稽查员管理 --------------------
 elif page == "稽查员管理":
-    st.caption("默认：性别=女，可带队=是。上次结束日期/城市用于更精准的就近排班。")
-
+    st.subheader("稽查员管理")
     with st.form("auditor_form", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
         name = c1.text_input("姓名*")
-        gender = c2.selectbox("性别", ["男", "女"], index=1)  # 默认女
+        gender = c2.selectbox("性别", ["女", "男"], index=0)
         group_level = c3.selectbox("等级", ["A", "B", "C"], index=1)
-        can_lead = c4.selectbox("可带队", ["否", "是"], index=1)  # 默认是
+        can_lead = c4.selectbox("可带队", ["是", "否"], index=0)
 
         c5, c6, c7, c8 = st.columns(4)
         base_city = c5.text_input("常驻城市*")
@@ -830,14 +764,14 @@ elif page == "稽查员管理":
         status_cn = c7.selectbox("状态", ["在岗", "请假", "冻结"])
         monthly_cases = c8.number_input("本月已排院次", min_value=0, value=0, step=1)
 
-        c9, c10, c11 = st.columns(3)
+        c9, c10, c11, c12 = st.columns(4)
         travel_days = c9.number_input("本月差旅天数", min_value=0, value=0, step=1)
         continuous_days = c10.number_input("连续工作天数", min_value=0, value=0, step=1)
-        last_city = c11.text_input("上次结束城市（可空）")
-
+        last_city = c11.text_input("上次结束城市")
         st.markdown("#### 上次结束日期（可空）")
-        fill_last_date = st.checkbox("填写上次结束日期", value=False)
-        last_date = st.date_input("上次结束日期", value=date.today(), disabled=(not fill_last_date))
+colx, coly = st.columns([1, 3])
+has_last_date = colx.checkbox("填写上次结束日期", value=False)
+last_date = coly.date_input("上次结束日期", value=date.today(), disabled=(not has_last_date))
 
         if st.form_submit_button("新增稽查员", type="primary"):
             if not name.strip() or not base_city.strip():
@@ -857,7 +791,7 @@ elif page == "稽查员管理":
                             travel_days=int(travel_days),
                             continuous_days=int(continuous_days),
                             last_task_end_city=last_city.strip() or None,
-                            last_task_end_date=(last_date if fill_last_date else None),
+                            last_task_end_date=last_date if has_last_date else None,
                         )
                     )
                     db.commit()
@@ -866,7 +800,6 @@ elif page == "稽查员管理":
 
     with db_session() as db:
         auditors = db.query(Auditor).order_by(Auditor.id.desc()).all()
-
     rows = []
     for a in auditors:
         rows.append(
@@ -887,13 +820,8 @@ elif page == "稽查员管理":
             }
         )
     show_table(rows)
-
     if auditors:
-        delete_id = st.selectbox(
-            "删除稽查员（按ID）",
-            [a.id for a in auditors],
-            format_func=lambda x: f"{x} - {next(a.name for a in auditors if a.id == x)}",
-        )
+        delete_id = st.selectbox("删除稽查员（按ID）", [a.id for a in auditors], format_func=lambda x: f"{x} - {next(a.name for a in auditors if a.id == x)}")
         if st.button("删除所选稽查员"):
             with db_session() as db:
                 obj = db.query(Auditor).filter(Auditor.id == delete_id).first()
@@ -903,13 +831,9 @@ elif page == "稽查员管理":
             st.success("已删除")
             st.rerun()
 
-
-# =========================
-# 页面：任务管理
-# =========================
+# -------------------- 页面：任务管理 --------------------
 elif page == "任务管理":
-    st.caption("结束日期可不填；不填时系统按“开始日期 + 任务天数”推算。")
-
+    st.subheader("任务管理")
     with st.form("task_form", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
         project_name = c1.text_input("项目名称*")
@@ -926,10 +850,10 @@ elif page == "任务管理":
         specified = c8.text_input("硬指定人员（可空）")
         preferred = c9.text_input("软指定专家/老师（可空）")
         start_date = c10.date_input("开始日期", value=date.today())
-
         st.markdown("#### 结束日期（可空）")
-        fill_end_date = st.checkbox("填写结束日期", value=False)
-        end_date = st.date_input("结束日期", value=start_date, disabled=(not fill_end_date))
+colx, coly = st.columns([1, 3])
+has_end_date = colx.checkbox("填写结束日期", value=False)
+end_date = coly.date_input("结束日期", value=start_date, disabled=(not has_end_date))
 
         if st.form_submit_button("新增任务", type="primary"):
             if not project_name.strip() or not site_city.strip():
@@ -948,7 +872,7 @@ elif page == "任务管理":
                             preferred_experts=preferred.strip() or None,
                             site_city=site_city.strip(),
                             start_date=start_date,
-                            end_date=(end_date if fill_end_date else None),
+                            end_date=end_date if has_end_date else None,
                         )
                     )
                     db.commit()
@@ -957,7 +881,6 @@ elif page == "任务管理":
 
     with db_session() as db:
         tasks = db.query(Task).order_by(Task.id.desc()).all()
-
     rows = []
     for t in tasks:
         rows.append(
@@ -977,13 +900,8 @@ elif page == "任务管理":
             }
         )
     show_table(rows)
-
     if tasks:
-        delete_id = st.selectbox(
-            "删除任务（按ID）",
-            [t.id for t in tasks],
-            format_func=lambda x: f"{x} - {next(t.project_name for t in tasks if t.id == x)}",
-        )
+        delete_id = st.selectbox("删除任务（按ID）", [t.id for t in tasks], format_func=lambda x: f"{x} - {next(t.project_name for t in tasks if t.id == x)}")
         if st.button("删除所选任务"):
             with db_session() as db:
                 obj = db.query(Task).filter(Task.id == delete_id).first()
@@ -993,13 +911,10 @@ elif page == "任务管理":
             st.success("已删除")
             st.rerun()
 
-
-# =========================
-# 页面：城市距离
-# =========================
+# -------------------- 页面：城市距离 --------------------
 elif page == "城市距离":
+    st.subheader("城市距离")
     st.caption("系统会优先读取距离表；若未命中，会尝试按城市坐标自动计算并写回缓存。")
-
     with st.form("distance_form", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
         from_city = c1.text_input("出发城市*")
@@ -1010,11 +925,7 @@ elif page == "城市距离":
                 st.error("出发城市、到达城市必填。")
             else:
                 with db_session() as db:
-                    rec = (
-                        db.query(CityDistance)
-                        .filter(CityDistance.from_city == from_city.strip(), CityDistance.to_city == to_city.strip())
-                        .first()
-                    )
+                    rec = db.query(CityDistance).filter(CityDistance.from_city == from_city.strip(), CityDistance.to_city == to_city.strip()).first()
                     if rec:
                         rec.km = float(km)
                     else:
@@ -1027,7 +938,6 @@ elif page == "城市距离":
         dists = db.query(CityDistance).order_by(CityDistance.id.desc()).limit(300).all()
     rows = [{"ID": d.id, "from": d.from_city, "to": d.to_city, "km": round(float(d.km or 0), 1)} for d in dists]
     show_table(rows)
-
     if dists:
         delete_id = st.selectbox("删除距离记录（按ID）", [d.id for d in dists])
         if st.button("删除所选距离记录"):
@@ -1039,13 +949,10 @@ elif page == "城市距离":
             st.success("已删除")
             st.rerun()
 
-
-# =========================
-# 页面：城市坐标
-# =========================
+# -------------------- 页面：城市坐标 --------------------
 elif page == "城市坐标":
+    st.subheader("城市坐标")
     st.caption("用于自动计算全国城市直线距离；CSV 格式：name,lat,lon。")
-
     with st.form("city_form", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
         name = c1.text_input("城市名*")
@@ -1071,8 +978,8 @@ elif page == "城市坐标":
         if not csv_file:
             st.warning("请先上传 CSV 文件。")
         else:
-            text_data = csv_file.getvalue().decode("utf-8-sig", errors="ignore")
-            reader = csv.reader(io.StringIO(text_data))
+            text = csv_file.getvalue().decode("utf-8-sig", errors="ignore")
+            reader = csv.reader(io.StringIO(text))
             imported = 0
             with db_session() as db:
                 for r in reader:
@@ -1101,7 +1008,6 @@ elif page == "城市坐标":
         cities = db.query(City).order_by(City.id.desc()).limit(300).all()
     rows = [{"ID": c.id, "城市": c.name, "lat": round(float(c.lat), 6), "lon": round(float(c.lon), 6)} for c in cities]
     show_table(rows)
-
     if cities:
         delete_id = st.selectbox("删除城市（按ID）", [c.id for c in cities])
         if st.button("删除所选城市"):
@@ -1113,13 +1019,12 @@ elif page == "城市坐标":
             st.success("已删除")
             st.rerun()
 
-
-# =========================
-# 页面：模板导入
-# =========================
+# -------------------- 页面：模板导入 --------------------
 elif page == "模板导入":
+    st.subheader("模板导入")
     st.caption("下载模板 → 填写 → 上传导入，支持新增/更新。")
 
+    # 下载：稽查员模板
     headers_a = [
         "姓名",
         "性别(男/女/不限)",
@@ -1134,9 +1039,9 @@ elif page == "模板导入":
         "上次结束城市",
         "上次结束日期(YYYY-MM-DD)",
     ]
-    explain_a = ["必填", "默认女", "必填", "默认是", "必填", "默认1", "默认在岗", "默认0", "默认0", "默认0", "可空", "可空"]
+    explain_a = ["必填", "可选", "必填", "可选", "必填", "默认1", "默认在岗", "默认0", "默认0", "默认0", "可空", "可空"]
     example_a = [
-        ["张三", "女", "A", "是", "北京", 1, "在岗", 0, 0, 0, "苏州", "2026-01-20"],
+        ["张三", "男", "A", "是", "北京", 1, "在岗", 0, 0, 0, "苏州", "2026-01-20"],
         ["李四", "女", "B", "是", "上海", 2, "在岗", 0, 0, 0, "", ""],
     ]
     bio_a = make_xlsx_template(headers_a, [explain_a] + example_a, sheet_name="稽查员")
@@ -1164,7 +1069,6 @@ elif page == "模板导入":
     st.download_button("下载任务模板（XLSX）", bio_t.getvalue(), file_name="任务模板.xlsx")
 
     st.divider()
-
     auditor_xlsx = st.file_uploader("上传稽查员模板", type=["xlsx"], key="auditor_xlsx")
     if st.button("导入稽查员模板"):
         if not auditor_xlsx:
@@ -1198,10 +1102,9 @@ elif page == "模板导入":
                         name = str(gv("name", "") or "").strip()
                         if not name:
                             continue
-
-                        gender = str(gv("gender", "女") or "女").strip() or "女"
+                        gender = str(gv("gender", "男") or "男").strip() or "男"
                         group_level = str(gv("group_level", "B") or "B").strip().upper() or "B"
-                        can_lead_team = str(gv("can_lead_team", "是") or "是").strip()
+                        can_lead_team = str(gv("can_lead_team", "否") or "否").strip()
                         base_city = str(gv("base_city", "") or "").strip()
                         max_weekly_tasks = int(gv("max_weekly_tasks", 1) or 1)
                         status = str(gv("status", "在岗") or "在岗").strip()
@@ -1209,7 +1112,6 @@ elif page == "模板导入":
                         travel_days = int(gv("travel_days", 0) or 0)
                         continuous_days = int(gv("continuous_days", 0) or 0)
                         last_city = str(gv("last_task_end_city", "") or "").strip() or None
-
                         last_date_raw = gv("last_task_end_date", "")
                         if isinstance(last_date_raw, datetime):
                             last_date = last_date_raw.date()
@@ -1250,12 +1152,10 @@ elif page == "模板导入":
                             )
                         imported += 1
                     db.commit()
-
                 st.success(f"已导入 / 更新 {imported} 条稽查员记录。")
                 st.rerun()
 
     st.divider()
-
     task_xlsx = st.file_uploader("上传任务模板", type=["xlsx"], key="task_xlsx")
     if st.button("导入任务模板"):
         if not task_xlsx:
@@ -1288,7 +1188,6 @@ elif page == "模板导入":
                         project_name = str(gv("project_name", "") or "").strip()
                         if not project_name:
                             continue
-
                         customer_name = str(gv("customer_name", "") or "").strip() or None
                         need_expert = str(gv("need_expert", "否") or "否").strip() in BOOL_TRUE
                         required_headcount = int(gv("required_headcount", 1) or 1)
@@ -1297,7 +1196,6 @@ elif page == "模板导入":
                         specified = str(gv("specified_auditors", "") or "").strip() or None
                         preferred = str(gv("preferred_experts", "") or "").strip() or None
                         site_city = str(gv("site_city", "") or "").strip()
-
                         sd_raw = gv("start_date", "")
                         if isinstance(sd_raw, datetime):
                             start_d = sd_raw.date()
@@ -1305,10 +1203,8 @@ elif page == "模板导入":
                             start_d = sd_raw
                         else:
                             start_d = safe_parse_date(str(sd_raw or ""))
-
                         if not start_d:
                             continue
-
                         ed_raw = gv("end_date", "")
                         if isinstance(ed_raw, datetime):
                             end_d = ed_raw.date()
@@ -1317,11 +1213,7 @@ elif page == "模板导入":
                         else:
                             end_d = safe_parse_date(str(ed_raw or ""))
 
-                        rec = (
-                            db.query(Task)
-                            .filter(Task.project_name == project_name, Task.start_date == start_d, Task.site_city == site_city)
-                            .first()
-                        )
+                        rec = db.query(Task).filter(Task.project_name == project_name, Task.start_date == start_d, Task.site_city == site_city).first()
                         if rec:
                             rec.customer_name = customer_name
                             rec.need_expert = need_expert
@@ -1349,15 +1241,12 @@ elif page == "模板导入":
                             )
                         imported += 1
                     db.commit()
-
                 st.success(f"已导入 / 更新 {imported} 条任务记录。")
                 st.rerun()
 
-
-# =========================
-# 页面：账号管理
-# =========================
+# -------------------- 页面：账号管理 --------------------
 elif page == "账号管理":
+    st.subheader("账号管理")
     current_user = st.session_state.get("login_user", "")
     is_admin = bool(st.session_state.get("is_admin", False))
 
@@ -1444,13 +1333,10 @@ elif page == "账号管理":
             else:
                 st.info("当前没有可删除的账号（默认 admin 和当前登录账号不可删除）。")
 
-
-# =========================
-# 页面：日历视图
-# =========================
+# -------------------- 页面：日历视图 --------------------
 elif page == "日历视图":
-    st.caption("按月查看排班、节假日标识，并支持导出 ICS / 导出 Excel。")
-
+    st.subheader("日历视图")
+    st.caption("按月查看排班、节假日标识，并支持导出 ICS 日历。")
     with db_session() as db:
         auditors = db.query(Auditor).order_by(Auditor.name.asc()).all()
         all_schedules = db.query(Schedule).order_by(Schedule.start_date.asc()).all()
@@ -1458,7 +1344,6 @@ elif page == "日历视图":
     auditor_options = {"全部稽查员": None}
     for a in auditors:
         auditor_options[f"#{a.id} {a.name}"] = a.id
-
     c1, c2, c3 = st.columns(3)
     auditor_label = c1.selectbox("筛选稽查员", list(auditor_options.keys()))
     year = c2.selectbox("年份", list(range(date.today().year - 2, date.today().year + 3)), index=2)
@@ -1480,6 +1365,7 @@ elif page == "日历视图":
 
     st.subheader(f"{year}年{month}月 日历总览")
     weeks = []
+    # Monday-first calendar matrix
     first_cell = month_start - timedelta(days=month_start.weekday())
     current = first_cell
     for _ in range(6):
@@ -1505,15 +1391,12 @@ elif page == "日历视图":
                 if s.start_date <= day <= s.end_date:
                     proj = s.task.project_name if s.task else f"任务#{s.task_id}"
                     person = s.auditor.name if s.auditor else f"稽查员#{s.auditor_id}"
-                    role = "组长" if s.role == "leader" else "成员"
-                    evs.append(f"{proj}｜{person}（{role}）")
-
+                    evs.append(f"{proj}｜{person}")
             color = "#ffffff"
             if day.month != month:
                 color = "#f7f7f7"
             elif evs:
                 color = "#eef6ff"
-
             cols[idx].markdown(
                 f"<div style='border:1px solid #ddd;border-radius:8px;padding:8px;min-height:120px;background:{color};'>"
                 f"<div style='font-weight:600'>{day.day}</div>"
@@ -1525,46 +1408,37 @@ elif page == "日历视图":
             )
 
     st.divider()
-    st.subheader("本月排班明细（可导出 Excel）")
-
-    detail_rows = []
+    st.subheader("本月排班明细")
+    rows = []
     for s in filtered:
-        detail_rows.append(
+        rows.append(
             {
-                "排班ID": s.id,
+                "ID": s.id,
                 "项目": s.task.project_name if s.task else "",
-                "客户": s.task.customer_name if s.task else "",
-                "中心城市": s.task.site_city if s.task else "",
+                "城市": s.task.site_city if s.task else "",
                 "角色": "组长" if s.role == "leader" else "成员",
                 "稽查员": s.auditor.name if s.auditor else "",
-                "稽查员等级": s.auditor.group_level if s.auditor else "",
-                "开始日期": d2s(s.start_date),
-                "结束日期": d2s(s.end_date),
-                "出发城市": s.travel_from_city,
-                "到达城市": s.travel_to_city,
+                "时间": f"{d2s(s.start_date)} ~ {d2s(s.end_date)}",
+                "路线": f"{s.travel_from_city} → {s.travel_to_city}",
                 "距离(km)": round(float(s.distance_km or 0), 1),
             }
         )
+    show_table(rows, 320)
 
-    show_table(detail_rows, 320)
-
-    # Excel 导出（当前筛选明细）
-    if detail_rows:
-        headers = list(detail_rows[0].keys())
-        rows = [[r.get(h, "") for h in headers] for r in detail_rows]
-        excel_bytes = make_excel_bytes(headers, rows, sheet_name=f"{year}-{month:02d}")
+    # 导出 Excel（本月明细）
+    if rows:
+        headers_excel = list(rows[0].keys())
+        excel_rows = [list(r.values()) for r in rows]
+        bio = build_excel_bytes(headers_excel, excel_rows)
         st.download_button(
-            "导出当前明细 Excel",
-            data=excel_bytes,
-            file_name=f"{APP_NAME}_{year}{month:02d}_排班明细.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "导出本月排班明细（Excel）",
+            bio.getvalue(),
+            file_name=f"{APP_NAME}_{year}-{int(month):02d}_排班明细.xlsx",
         )
-
-    st.divider()
 
     with db_session() as db:
         all_ics = build_ics_events(db)
-        st.download_button("导出全部 ICS 日历", all_ics, file_name=f"{APP_NAME}_all.ics")
+        st.download_button("导出全部 ICS 日历", all_ics, file_name="wnrh_all.ics")
         if auditor_id:
             one_ics = build_ics_events(db, auditor_id=auditor_id)
-            st.download_button("导出当前稽查员 ICS 日历", one_ics, file_name=f"{APP_NAME}_auditor_{auditor_id}.ics")
+            st.download_button("导出当前稽查员 ICS 日历", one_ics, file_name=f"wnrh_auditor_{auditor_id}.ics")
