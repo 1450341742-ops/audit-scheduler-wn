@@ -84,15 +84,17 @@ def safe_commit(db: Session, context: str = "") -> bool:
         return False
 
 
-# -------------------- ✅ 关键修复：兼容不同 Streamlit data_editor 返回值 --------------------
+# -------------------- ✅ 终极修复：data_editor 提交与取值 --------------------
 def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_return):
     """
-    ✅ 最终稳定版：永远优先使用 st.session_state[editor_key] 的改动
-    因为很多版本的 st.data_editor 即使返回 DataFrame，也可能不是“最终编辑值”。
+    ✅ 最终稳定版：优先从 st.session_state[editor_key] 取编辑改动。
+    说明：很多 Streamlit 版本中 data_editor 即使返回 DataFrame，也可能不是“最终编辑值”；
+    并且如果不使用 form，点击外部 button 时可能不会提交正在编辑的单元格。
+    本函数仅负责：把 session_state 里的 edited_rows/deleted_rows/added_rows 合并回 df。
     """
     state = st.session_state.get(editor_key)
 
-    # 如果没有 state（极少数情况），再退回使用 editor_return
+    # 没有 state 时再退回 editor_return
     if not isinstance(state, dict):
         if isinstance(editor_return, pd.DataFrame):
             return editor_return
@@ -100,7 +102,6 @@ def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_ret
 
     df = original_df.copy()
 
-    # 1) edited_rows: {row_index: {col: value}}
     edited_rows = state.get("edited_rows") or {}
     for ridx, changes in edited_rows.items():
         try:
@@ -113,7 +114,6 @@ def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_ret
             if col in df.columns:
                 df.at[ridx, col] = val
 
-    # 2) deleted_rows: [row_index, ...]
     deleted_rows = state.get("deleted_rows") or []
     if deleted_rows:
         try:
@@ -121,7 +121,6 @@ def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_ret
         except Exception:
             pass
 
-    # 3) added_rows: [{col: val}, ...]
     added_rows = state.get("added_rows") or []
     if added_rows:
         try:
@@ -213,6 +212,14 @@ def hash_password(password: str) -> str:
 
 
 def ensure_auth_table():
+    """
+    auth_users 字段说明：
+    - username: 主键
+    - password_hash: 密码hash
+    - is_admin: 管理员（可管理账号/重置密码/新增删除账号）
+    - is_super_admin: 主管理员（可配置普通账号可见板块）
+    - allowed_pages_json: 普通账号可见板块（JSON 数组），管理员默认忽略=全部可见
+    """
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -229,10 +236,10 @@ def ensure_auth_table():
             )
         )
 
+    # 兼容旧库：若缺列则补齐
     with engine.begin() as conn:
         cols = conn.execute(text("PRAGMA table_info(auth_users)")).mappings().all()
         existing = {str(c.get("name")) for c in cols}
-
         if "is_super_admin" not in existing:
             conn.execute(text("ALTER TABLE auth_users ADD COLUMN is_super_admin INTEGER NOT NULL DEFAULT 0"))
         if "allowed_pages_json" not in existing:
@@ -266,6 +273,7 @@ def bootstrap_auth_users_if_needed():
     with engine.begin() as conn:
         count = conn.execute(text("SELECT COUNT(*) FROM auth_users")).scalar() or 0
         if int(count) > 0:
+            # 兜底：确保 admin 至少是主管理员
             row = conn.execute(
                 text("SELECT username, is_super_admin FROM auth_users WHERE username='admin'")
             ).mappings().first()
@@ -356,7 +364,7 @@ def get_user_allowed_pages(username: str) -> list[str]:
     if not u:
         return DEFAULT_NORMAL_PAGES[:]
     if int(u.get("is_admin", 0)) == 1:
-        return ALL_PAGES[:]
+        return ALL_PAGES[:]  # 管理员默认全功能
     raw = u.get("allowed_pages_json") or ""
     try:
         arr = json.loads(raw) if raw else []
@@ -403,6 +411,7 @@ def create_auth_user(username: str, password: str, is_admin: bool = False, is_su
     if get_auth_user(clean_user):
         return False, "该账号已存在"
 
+    # 主管理员必须同时是管理员
     if is_super_admin:
         is_admin = True
 
@@ -748,12 +757,7 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
             report["skipped"].append({"task_id": t.id, "project": t.project_name, "reason": "数据库写入失败"})
             continue
         report["assigned"].append(
-            {
-                "task_id": t.id,
-                "project": t.project_name,
-                "leader": team.leader.auditor_name,
-                "members": [m.auditor_name for m in team.members],
-            }
+            {"task_id": t.id, "project": t.project_name, "leader": team.leader.auditor_name, "members": [m.auditor_name for m in team.members]}
         )
     return report
 
@@ -856,16 +860,14 @@ def render_data_cleanup():
 # -------------------- 侧边栏 --------------------
 st.sidebar.title(APP_NAME)
 
-# DB 诊断（保留）
+# DB 诊断：显示当前数据库路径（你已验证会显示 /mount/...）
 from app import db as dbmod
 
 p = Path(str(getattr(dbmod, "DB_FILE", "")))
 st.sidebar.write("✅ 当前数据库文件：")
 st.sidebar.code(str(p))
 if p and p.exists():
-    st.sidebar.write(
-        f"存在：True | 大小：{p.stat().st_size} bytes | 修改时间：{datetime.fromtimestamp(p.stat().st_mtime)}"
-    )
+    st.sidebar.write(f"存在：True | 大小：{p.stat().st_size} bytes | 修改时间：{datetime.fromtimestamp(p.stat().st_mtime)}")
 else:
     st.sidebar.write("存在：False（说明还没生成/或路径不对）")
 
@@ -879,6 +881,7 @@ if st.sidebar.button("退出登录", key="logout_btn"):
     st.session_state["allowed_pages"] = DEFAULT_NORMAL_PAGES[:]
     st.rerun()
 
+# 基于账号权限过滤可见功能
 current_user = st.session_state.get("login_user", "")
 is_admin = bool(st.session_state.get("is_admin", False))
 allowed_pages = st.session_state.get("allowed_pages") or get_user_allowed_pages(current_user)
@@ -887,6 +890,8 @@ st.session_state["allowed_pages"] = allowed_pages
 
 page = st.sidebar.radio("功能导航", allowed_pages, key="nav_radio")
 st.sidebar.caption(f"当前位置：{page}")
+
+# ✅ 右侧标题随左侧页面变更
 st.title(f"{APP_NAME}｜{page}")
 
 if (not is_admin) and (page not in allowed_pages):
@@ -978,9 +983,7 @@ if page == "智能排班":
                     st.write("**组员：** 无")
                 st.caption(f"{team.notes}｜团队评分 {team.team_score}")
                 default_member_ids = ",".join([str(m.auditor_id) for m in team.members])
-                member_ids_text = st.text_input(
-                    "确认指派前，可手工调整组员ID（逗号分隔）", value=default_member_ids, key="member_ids_text"
-                )
+                member_ids_text = st.text_input("确认指派前，可手工调整组员ID（逗号分隔）", value=default_member_ids, key="member_ids_text")
                 if st.button("确认指派", type="primary", key="confirm_assign_btn"):
                     ids = [x for x in re.split(r"[，,\s]+", member_ids_text.strip()) if x.strip()]
                     member_ids = []
@@ -1152,20 +1155,24 @@ elif page == "稽查员管理":
     if rows:
         st.caption("支持在表格内直接修改；勾选“删除”后点保存，即可删除对应人员。")
         df = pd.DataFrame(rows)
-        editor_return = st.data_editor(
-            df,
-            use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            key="auditor_editor",
-            column_config={
-                "ID": st.column_config.NumberColumn(disabled=True),
-                "上次结束日期": st.column_config.TextColumn(help="格式：YYYY-MM-DD"),
-                "删除": st.column_config.CheckboxColumn(),
-            },
-        )
 
-        if st.button("保存稽查员表格修改", type="primary", key="save_auditor_editor_btn"):
+        # ✅ 关键：form 包住 data_editor + 保存按钮（保证编辑单元格提交）
+        with st.form("auditor_editor_form", clear_on_submit=False):
+            editor_return = st.data_editor(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                key="auditor_editor",
+                column_config={
+                    "ID": st.column_config.NumberColumn(disabled=True),
+                    "上次结束日期": st.column_config.TextColumn(help="格式：YYYY-MM-DD"),
+                    "删除": st.column_config.CheckboxColumn(),
+                },
+            )
+            submitted = st.form_submit_button("保存稽查员表格修改", type="primary")
+
+        if submitted:
             final_df = materialize_editor_df(df, "auditor_editor", editor_return)
             if save_auditor_editor(pd.DataFrame(final_df)):
                 st.success("稽查员数据已更新")
@@ -1250,21 +1257,25 @@ elif page == "任务管理":
     if rows:
         st.caption("支持在表格内直接修改；勾选“删除”后点保存，即可删除对应任务。")
         df = pd.DataFrame(rows)
-        editor_return = st.data_editor(
-            df,
-            use_container_width=True,
-            hide_index=True,
-            num_rows="fixed",
-            key="task_editor",
-            column_config={
-                "ID": st.column_config.NumberColumn(disabled=True),
-                "开始": st.column_config.TextColumn(help="格式：YYYY-MM-DD"),
-                "结束": st.column_config.TextColumn(help="格式：YYYY-MM-DD"),
-                "删除": st.column_config.CheckboxColumn(),
-            },
-        )
 
-        if st.button("保存任务表格修改", type="primary", key="save_task_editor_btn"):
+        # ✅ 关键：form 包住 data_editor + 保存按钮（保证编辑单元格提交）
+        with st.form("task_editor_form", clear_on_submit=False):
+            editor_return = st.data_editor(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="fixed",
+                key="task_editor",
+                column_config={
+                    "ID": st.column_config.NumberColumn(disabled=True),
+                    "开始": st.column_config.TextColumn(help="格式：YYYY-MM-DD"),
+                    "结束": st.column_config.TextColumn(help="格式：YYYY-MM-DD"),
+                    "删除": st.column_config.CheckboxColumn(),
+                },
+            )
+            submitted = st.form_submit_button("保存任务表格修改", type="primary")
+
+        if submitted:
             final_df = materialize_editor_df(df, "task_editor", editor_return)
             if save_task_editor(pd.DataFrame(final_df)):
                 st.success("任务数据已更新")
@@ -1697,12 +1708,7 @@ elif page == "日历视图":
         st.download_button("导出全部 ICS 日历", all_ics, file_name="wnrh_all.ics", key="dl_all_ics")
         if auditor_id:
             one_ics = build_ics_events(db, auditor_id=auditor_id)
-            st.download_button(
-                "导出当前稽查员 ICS 日历",
-                one_ics,
-                file_name=f"wnrh_auditor_{auditor_id}.ics",
-                key="dl_one_ics",
-            )
+            st.download_button("导出当前稽查员 ICS 日历", one_ics, file_name=f"wnrh_auditor_{auditor_id}.ics", key="dl_one_ics")
 
 
 # -------------------- 页面：账号管理 --------------------
@@ -1798,6 +1804,7 @@ elif page == "账号管理":
                             else:
                                 st.error(msg)
 
+        # 主管理员：配置普通用户可见板块
         st.divider()
         if not is_super_admin:
             st.info("提示：只有【主管理员】可以配置普通账号的可见板块。")
