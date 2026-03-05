@@ -1,41 +1,51 @@
 from __future__ import annotations
 
 import os
-import re
+import sys
 import sqlite3
 from pathlib import Path
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
-# =========================
-# ✅ 固定数据库路径（关键修复）
-# =========================
-# 1) 若设置环境变量 AUDIT_SCHEDULER_DB，则优先使用（可填绝对路径或相对路径）
-# 2) 否则默认放到用户目录：~/WNRH_AuditScheduler/audit_scheduler.db
+# =========================================================
+# ✅ 关键修复：数据库路径唯一化（彻底解决“保存后不生效/刷新又变回去”）
+# 之前的问题：sqlite:///./audit_scheduler.db 依赖当前工作目录，导致写A读B
 #
-# 这样无论你在任何目录启动、Streamlit 重载、打包 exe、同事运行，都不会“写A读B”。
+# 现在规则（优先级从高到低）：
+# 1) 环境变量 AUDIT_SCHEDULER_DB 指定（绝对/相对都行）
+# 2) 若是打包 exe（sys.frozen=True）：固定到用户目录 ~/WNRH_AuditScheduler/
+# 3) 否则源码运行：固定到项目根目录 ./data/
+# =========================================================
+
+def _project_root() -> Path:
+    # app/db.py 在 app/ 下，项目根目录是上一级
+    return Path(__file__).resolve().parent.parent
+
 
 def _resolve_db_file() -> Path:
+    # 1) 手动指定（可选）
     env = os.environ.get("AUDIT_SCHEDULER_DB", "").strip()
     if env:
         p = Path(env).expanduser()
         if not p.is_absolute():
-            # 相对路径按“当前文件所在项目根目录”解析（而不是 os.getcwd()）
-            # app/db.py 在 app/ 下，所以 root 是 app 的上一级
-            root = Path(__file__).resolve().parent.parent
-            p = (root / p).resolve()
+            p = (_project_root() / p).resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
-    base_dir = Path.home() / "WNRH_AuditScheduler"
-    base_dir.mkdir(parents=True, exist_ok=True)
-    return base_dir / "audit_scheduler.db"
+    # 2) 打包 exe：不要放 exe 目录（可能无写权限/临时目录）
+    if getattr(sys, "frozen", False):
+        base = Path.home() / "WNRH_AuditScheduler"
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "audit_scheduler.db"
+
+    # 3) 源码运行：固定到项目根目录 data/
+    base = _project_root() / "data"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "audit_scheduler.db"
 
 
 DB_FILE = _resolve_db_file()
-
-# sqlite:/// + 绝对路径（Windows 需要 replace("\\","/")）
 DB_URL = f"sqlite:///{str(DB_FILE).replace('\\', '/')}"
 
 
@@ -62,7 +72,7 @@ def get_db():
 
 def ensure_schema():
     """SQLite 轻量迁移：为已有数据库补齐缺失字段（避免升级后录入/查询异常）。
-    ✅ 关键：这里必须使用 DB_FILE（稳定绝对路径），不能用 os.getcwd()。
+    ✅ 注意：必须使用 DB_FILE（唯一绝对路径），不能用 os.getcwd()。
     """
     db_file = DB_FILE
     if not db_file.exists():
