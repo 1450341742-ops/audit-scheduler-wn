@@ -853,6 +853,18 @@ def render_data_cleanup():
 
 # -------------------- 侧边栏 --------------------
 st.sidebar.title(APP_NAME)
+from app import db as dbmod
+from pathlib import Path
+from datetime import datetime
+
+p = Path(str(getattr(dbmod, "DB_FILE", "")))
+st.sidebar.write("✅ 当前数据库文件：")
+st.sidebar.code(str(p))
+
+if p and p.exists():
+    st.sidebar.write(f"存在：True | 大小：{p.stat().st_size} bytes | 修改时间：{datetime.fromtimestamp(p.stat().st_mtime)}")
+else:
+    st.sidebar.write("存在：False（说明还没生成/或路径不对）")
 st.sidebar.caption(f"当前用户：{st.session_state.get('login_user', '')}")
 
 if st.sidebar.button("退出登录", key="logout_btn"):
