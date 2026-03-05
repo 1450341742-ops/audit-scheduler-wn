@@ -84,6 +84,63 @@ def safe_commit(db: Session, context: str = "") -> bool:
         return False
 
 
+# -------------------- ✅ 关键修复：兼容不同 Streamlit data_editor 返回值 --------------------
+def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_return):
+    """
+    兼容 Streamlit 不同版本：
+    - 新版本：st.data_editor 返回编辑后的 DataFrame
+    - 部分版本：返回原始 DataFrame，修改内容在 st.session_state[editor_key] 里
+    """
+    if isinstance(editor_return, pd.DataFrame):
+        return editor_return
+
+    state = st.session_state.get(editor_key)
+    if not isinstance(state, dict):
+        return original_df
+
+    df = original_df.copy()
+
+    # 1) edited_rows: {row_index: {col: value}}
+    edited_rows = state.get("edited_rows", {}) or {}
+    try:
+        for ridx, changes in edited_rows.items():
+            ridx = int(ridx)
+            for col, val in (changes or {}).items():
+                if col in df.columns and 0 <= ridx < len(df):
+                    df.at[ridx, col] = val
+    except Exception:
+        pass
+
+    # 2) deleted_rows: [row_index, ...]
+    deleted_rows = state.get("deleted_rows", []) or []
+    try:
+        if deleted_rows:
+            df = df.drop(index=[int(i) for i in deleted_rows if str(i).strip() != ""]).reset_index(drop=True)
+    except Exception:
+        pass
+
+    # 3) added_rows: [{col: val}, ...]（本项目默认不启用动态新增行，但这里兼容）
+    added_rows = state.get("added_rows", []) or []
+    try:
+        if added_rows:
+            df = pd.concat([df, pd.DataFrame(added_rows)], ignore_index=True)
+    except Exception:
+        pass
+
+    return df
+
+
+def _safe_int(x, default=None):
+    try:
+        if x is None:
+            return default
+        if isinstance(x, float) and pd.isna(x):
+            return default
+        return int(float(str(x).strip()))
+    except Exception:
+        return default
+
+
 # -------------------- seed --------------------
 def seed_city_distances_if_needed(db: Session):
     seen = set()
@@ -146,7 +203,6 @@ ALL_PAGES = [
     "数据清理",
 ]
 
-# 普通用户默认可见板块（可由主管理员自定义覆盖）
 DEFAULT_NORMAL_PAGES = ["任务管理", "稽查员管理", "日历视图"]
 
 
@@ -155,14 +211,6 @@ def hash_password(password: str) -> str:
 
 
 def ensure_auth_table():
-    """
-    auth_users 字段说明：
-    - username: 主键
-    - password_hash: 密码hash
-    - is_admin: 管理员（可管理账号/重置密码/新增删除账号）
-    - is_super_admin: 主管理员（可配置普通账号可见板块）
-    - allowed_pages_json: 普通账号可见板块（JSON 数组），管理员默认忽略=全部可见
-    """
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -179,7 +227,6 @@ def ensure_auth_table():
             )
         )
 
-    # 兼容旧库：若缺列则补齐
     with engine.begin() as conn:
         cols = conn.execute(text("PRAGMA table_info(auth_users)")).mappings().all()
         existing = {str(c.get("name")) for c in cols}
@@ -217,7 +264,6 @@ def bootstrap_auth_users_if_needed():
     with engine.begin() as conn:
         count = conn.execute(text("SELECT COUNT(*) FROM auth_users")).scalar() or 0
         if int(count) > 0:
-            # 兜底：确保 admin 至少是主管理员
             row = conn.execute(
                 text("SELECT username, is_super_admin FROM auth_users WHERE username='admin'")
             ).mappings().first()
@@ -308,7 +354,7 @@ def get_user_allowed_pages(username: str) -> list[str]:
     if not u:
         return DEFAULT_NORMAL_PAGES[:]
     if int(u.get("is_admin", 0)) == 1:
-        return ALL_PAGES[:]  # 管理员默认全功能
+        return ALL_PAGES[:]
     raw = u.get("allowed_pages_json") or ""
     try:
         arr = json.loads(raw) if raw else []
@@ -355,7 +401,6 @@ def create_auth_user(username: str, password: str, is_admin: bool = False, is_su
     if get_auth_user(clean_user):
         return False, "该账号已存在"
 
-    # 主管理员必须同时是管理员
     if is_super_admin:
         is_admin = True
 
@@ -437,7 +482,6 @@ def render_login():
             st.session_state["login_user"] = str(username).strip()
             st.session_state["is_admin"] = bool(int(user.get("is_admin", 0))) if user else False
             st.session_state["is_super_admin"] = bool(int(user.get("is_super_admin", 0))) if user else False
-            # 登录时加载可见板块
             st.session_state["allowed_pages"] = get_user_allowed_pages(str(username).strip())
             st.rerun()
         else:
@@ -584,14 +628,12 @@ def build_ics_events(db: Session, auditor_id: int | None = None):
 
 
 def assign_team_to_task(db: Session, task: Task, leader_id: int, member_ids: list[int]):
-    # 已排班任务不允许重复排班
     if db.query(Schedule).filter(Schedule.task_id == task.id).count() > 0:
         return False, "该任务已存在排班记录，不能重复排班"
 
     start_date = task.start_date
     end_date = task.end_date or (task.start_date + timedelta(days=max(1, int(task.required_days or 1)) - 1))
 
-    # 稽查员时间冲突检查
     selected_ids = [int(leader_id)] + [int(x) for x in member_ids if int(x) != int(leader_id)]
     for aid in selected_ids:
         existing = db.query(Schedule).filter(Schedule.auditor_id == aid).all()
@@ -730,23 +772,25 @@ def load_day_marks():
 def save_auditor_editor(df: pd.DataFrame):
     with db_session() as db:
         for _, row in df.iterrows():
-            rid = int(row["ID"])
+            rid = _safe_int(row.get("ID"), None)
+            if rid is None:
+                continue
             obj = db.query(Auditor).filter(Auditor.id == rid).first()
             if not obj:
                 continue
             if bool(row.get("删除", False)):
                 db.delete(obj)
                 continue
-            obj.name = str(row["姓名"]).strip()
-            obj.gender = str(row["性别"]).strip() or "女"
-            obj.group_level = str(row["等级"]).strip() or "B"
-            obj.can_lead_team = str(row["可带队"]).strip() == "是"
-            obj.base_city = str(row["常驻城市"]).strip()
-            obj.max_weekly_tasks = int(row["周上限"])
-            obj.status = STATUS_MAP.get(str(row["状态"]).strip(), "active")
-            obj.monthly_cases = int(row["本月院次"])
-            obj.travel_days = int(row["差旅天数"])
-            obj.continuous_days = int(row["连续天数"])
+            obj.name = str(row.get("姓名", "")).strip()
+            obj.gender = str(row.get("性别", "")).strip() or "女"
+            obj.group_level = str(row.get("等级", "")).strip() or "B"
+            obj.can_lead_team = str(row.get("可带队", "")).strip() == "是"
+            obj.base_city = str(row.get("常驻城市", "")).strip()
+            obj.max_weekly_tasks = _safe_int(row.get("周上限"), 0) or 0
+            obj.status = STATUS_MAP.get(str(row.get("状态", "")).strip(), "active")
+            obj.monthly_cases = _safe_int(row.get("本月院次"), 0) or 0
+            obj.travel_days = _safe_int(row.get("差旅天数"), 0) or 0
+            obj.continuous_days = _safe_int(row.get("连续天数"), 0) or 0
             obj.last_task_end_city = str(row.get("上次结束城市", "") or "").strip() or None
             obj.last_task_end_date = safe_parse_date(str(row.get("上次结束日期", "") or "")) or date.today()
         return safe_commit(db, "保存稽查员表格编辑")
@@ -755,30 +799,34 @@ def save_auditor_editor(df: pd.DataFrame):
 def save_task_editor(df: pd.DataFrame):
     with db_session() as db:
         for _, row in df.iterrows():
-            rid = int(row["ID"])
+            rid = _safe_int(row.get("ID"), None)
+            if rid is None:
+                continue
             obj = db.query(Task).filter(Task.id == rid).first()
             if not obj:
                 continue
             if bool(row.get("删除", False)):
-                # 已排班任务先删排班再删任务，避免外键问题
                 db.query(Schedule).filter(Schedule.task_id == rid).delete()
                 db.delete(obj)
                 continue
-            obj.project_name = str(row["项目"]).strip()
+
+            obj.project_name = str(row.get("项目", "")).strip()
             obj.customer_name = str(row.get("客户", "") or "").strip() or None
-            obj.need_expert = str(row["需要A"]).strip() == "是"
-            obj.required_headcount = int(row["人数"])
-            obj.required_days = int(row["天数"])
-            obj.required_gender = str(row["性别"]).strip() or "不限"
+            obj.need_expert = str(row.get("需要A", "")).strip() == "是"
+            obj.required_headcount = _safe_int(row.get("人数"), 1) or 1
+            obj.required_days = _safe_int(row.get("天数"), 1) or 1
+            obj.required_gender = str(row.get("性别", "")).strip() or "不限"
             obj.specified_auditors = str(row.get("硬指定", "") or "").strip() or None
             obj.preferred_experts = str(row.get("软指定", "") or "").strip() or None
-            obj.site_city = str(row["城市"]).strip()
-            sd = safe_parse_date(str(row["开始"]))
-            ed = safe_parse_date(str(row["结束"]))
+            obj.site_city = str(row.get("城市", "")).strip()
+
+            sd = safe_parse_date(str(row.get("开始", "") or ""))
+            ed = safe_parse_date(str(row.get("结束", "") or ""))
             if sd:
                 obj.start_date = sd
             if ed:
                 obj.end_date = ed
+
         return safe_commit(db, "保存任务表格编辑")
 
 
@@ -815,23 +863,16 @@ if st.sidebar.button("退出登录", key="logout_btn"):
     st.session_state["allowed_pages"] = DEFAULT_NORMAL_PAGES[:]
     st.rerun()
 
-# 基于账号权限过滤可见功能
 current_user = st.session_state.get("login_user", "")
 is_admin = bool(st.session_state.get("is_admin", False))
 allowed_pages = st.session_state.get("allowed_pages") or get_user_allowed_pages(current_user)
 allowed_pages = _normalize_pages(allowed_pages) if not is_admin else ALL_PAGES[:]
 st.session_state["allowed_pages"] = allowed_pages
 
-page = st.sidebar.radio(
-    "功能导航",
-    allowed_pages,
-    key="nav_radio",
-)
-
+page = st.sidebar.radio("功能导航", allowed_pages, key="nav_radio")
 st.sidebar.caption(f"当前位置：{page}")
 st.title(f"{APP_NAME}｜{page}")
 
-# 强制保护：即使 session_state 被篡改，也不能访问未授权页面
 if (not is_admin) and (page not in allowed_pages):
     st.error("当前账号无权限访问该板块，请联系主管理员开通。")
     st.stop()
@@ -1093,7 +1134,7 @@ elif page == "稽查员管理":
     if rows:
         st.caption("支持在表格内直接修改；勾选“删除”后点保存，即可删除对应人员。")
         df = pd.DataFrame(rows)
-        edited_df = st.data_editor(
+        editor_return = st.data_editor(
             df,
             use_container_width=True,
             hide_index=True,
@@ -1104,9 +1145,13 @@ elif page == "稽查员管理":
                 "删除": st.column_config.CheckboxColumn(),
             },
         )
+
         if st.button("保存稽查员表格修改", type="primary", key="save_auditor_editor_btn"):
-            if save_auditor_editor(pd.DataFrame(edited_df)):
+            final_df = materialize_editor_df(df, "auditor_editor", editor_return)
+            if save_auditor_editor(pd.DataFrame(final_df)):
                 st.success("稽查员数据已更新")
+                # ✅ 清掉 editor 缓存，避免下一次加载被旧状态覆盖
+                st.session_state.pop("auditor_editor", None)
                 st.rerun()
     else:
         st.info("暂无数据")
@@ -1187,7 +1232,7 @@ elif page == "任务管理":
     if rows:
         st.caption("支持在表格内直接修改；勾选“删除”后点保存，即可删除对应任务。")
         df = pd.DataFrame(rows)
-        edited_df = st.data_editor(
+        editor_return = st.data_editor(
             df,
             use_container_width=True,
             hide_index=True,
@@ -1199,9 +1244,13 @@ elif page == "任务管理":
                 "删除": st.column_config.CheckboxColumn(),
             },
         )
+
         if st.button("保存任务表格修改", type="primary", key="save_task_editor_btn"):
-            if save_task_editor(pd.DataFrame(edited_df)):
+            final_df = materialize_editor_df(df, "task_editor", editor_return)
+            if save_task_editor(pd.DataFrame(final_df)):
                 st.success("任务数据已更新")
+                # ✅ 清掉 editor 缓存，避免下一次加载被旧状态覆盖
+                st.session_state.pop("task_editor", None)
                 st.rerun()
     else:
         st.info("暂无数据")
@@ -1696,11 +1745,7 @@ elif page == "账号管理":
                 elif int(u.get("is_admin", 0)) == 1:
                     role_cn = "管理员"
                 rows.append(
-                    {
-                        "账号": u.get("username"),
-                        "权限": role_cn,
-                        "创建时间": u.get("created_at") or "",
-                    }
+                    {"账号": u.get("username"), "权限": role_cn, "创建时间": u.get("created_at") or ""}
                 )
             show_table(rows, 260)
         else:
@@ -1737,7 +1782,6 @@ elif page == "账号管理":
                             else:
                                 st.error(msg)
 
-        # 主管理员：配置普通用户可见板块
         st.divider()
         if not is_super_admin:
             st.info("提示：只有【主管理员】可以配置普通账号的可见板块。")
@@ -1755,21 +1799,18 @@ elif page == "账号管理":
                 st.info("暂无普通账号")
             else:
                 target_user = st.selectbox("选择普通账号", normal_users, key="perm_target_user")
-
                 current_pages = get_user_allowed_pages(target_user)
-                # 用 multiselect 实现“勾选对应功能”
                 selected_pages = st.multiselect(
                     "可见板块（勾选）",
                     options=ALL_PAGES,
                     default=current_pages,
                     key="perm_pages_multiselect",
                 )
-                c1, c2 = st.columns([1, 3])
+                c1, _ = st.columns([1, 3])
                 if c1.button("保存可见板块", type="primary", key="save_perm_btn"):
                     ok, msg = set_user_allowed_pages(target_user, selected_pages)
                     if ok:
                         st.success(msg)
-                        # 如果正在配置的是当前登录用户（极少见，因主管理员通常是 admin），同步刷新
                         if str(target_user).strip() == str(current_user).strip():
                             st.session_state["allowed_pages"] = get_user_allowed_pages(current_user)
                         st.rerun()
