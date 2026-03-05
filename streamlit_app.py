@@ -1,3 +1,7 @@
+# streamlit_app.py （根目录）——完全可覆盖版
+# 功能：登录权限（管理员/主管理员/普通用户可见板块配置）、表格内编辑保存（form+session_state稳定提交）、DB诊断、智能/批量排班、导入导出、日历视图、账号管理、数据清理
+# 注意：依赖 app/ 目录下的 db.py、models.py、scheduler.py、seed_distances.py
+
 import csv
 import io
 import json
@@ -1546,6 +1550,7 @@ elif page == "模板导入":
                     rec = db.query(Task).filter(Task.project_name == project_name, Task.start_date == start_d, Task.site_city == site_city).first()
                     if rec:
                         rec.end_date = end_d
+                        rec.required_days = max(1, (end_d - start_d).days + 1)
                     else:
                         db.add(
                             Task(
@@ -1844,3 +1849,6 @@ elif page == "账号管理":
 # -------------------- 页面：数据清理 --------------------
 elif page == "数据清理":
     render_data_cleanup()
+
+else:
+    st.info("请选择左侧功能导航。")
