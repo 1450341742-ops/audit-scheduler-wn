@@ -1,6 +1,9 @@
-# streamlit_app.py （根目录）——完全可覆盖版
-# 功能：登录权限（管理员/主管理员/普通用户可见板块配置）、表格内编辑保存（form+session_state稳定提交）、DB诊断、智能/批量排班、导入导出、日历视图、账号管理、数据清理
-# 注意：依赖 app/ 目录下的 db.py、models.py、scheduler.py、seed_distances.py
+# streamlit_app.py （根目录）——完全可覆盖版（已修复：表格改日期保存后刷新又变回去 / 变成数字）
+# ✅ 修复点：
+# 1) safe_parse_date 支持 date/datetime/Timestamp/带时间字符串/Excel序列号（45231）等
+# 2) 保存时不再 str() 日期字段，直接传入 safe_parse_date
+# 3) 保存时增加 “结束 < 开始” 拦截，避免倒挂
+# 4) 保留：登录权限（管理员/主管理员/普通用户可见板块配置）、form+data_editor稳定提交、DB诊断等
 
 import csv
 import io
@@ -51,12 +54,54 @@ def parse_date(value: str) -> date:
     return datetime.strptime(str(value).strip(), "%Y-%m-%d").date()
 
 
-def safe_parse_date(value: str | None) -> Optional[date]:
-    v = str(value or "").strip()
-    if not v:
+def safe_parse_date(value) -> Optional[date]:
+    """
+    ✅ 更鲁棒的日期解析：
+    - 支持 date / datetime / pandas Timestamp
+    - 支持 'YYYY-MM-DD'、'YYYY-MM-DD HH:MM:SS'
+    - 支持 Excel 序列号（int/float/纯数字字符串，比如 45231 或 45231.0）
+    """
+    if value is None:
         return None
+
+    # 1) 已经是 date/datetime
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+
+    # 2) pandas Timestamp（避免强耦合）
     try:
-        return parse_date(v)
+        if isinstance(value, pd.Timestamp):
+            return value.to_pydatetime().date()
+    except Exception:
+        pass
+
+    # 3) Excel 序列号（或纯数字字符串）
+    # Excel 常用起点：1899-12-30（兼容 Windows Excel）
+    try:
+        if isinstance(value, (int, float)) and not (isinstance(value, float) and pd.isna(value)):
+            base = datetime(1899, 12, 30)
+            return (base + timedelta(days=float(value))).date()
+
+        s_num = str(value).strip()
+        if re.fullmatch(r"\d+(\.\d+)?", s_num):
+            base = datetime(1899, 12, 30)
+            return (base + timedelta(days=float(s_num))).date()
+    except Exception:
+        pass
+
+    # 4) 字符串日期（允许带时间）
+    s = str(value).strip()
+    if not s:
+        return None
+
+    if " " in s:
+        s = s.split(" ")[0].strip()
+    s = s.replace("/", "-")
+
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date()
     except Exception:
         return None
 
@@ -92,13 +137,10 @@ def safe_commit(db: Session, context: str = "") -> bool:
 def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_return):
     """
     ✅ 最终稳定版：优先从 st.session_state[editor_key] 取编辑改动。
-    说明：很多 Streamlit 版本中 data_editor 即使返回 DataFrame，也可能不是“最终编辑值”；
-    并且如果不使用 form，点击外部 button 时可能不会提交正在编辑的单元格。
-    本函数仅负责：把 session_state 里的 edited_rows/deleted_rows/added_rows 合并回 df。
+    本函数负责把 session_state 里的 edited_rows/deleted_rows/added_rows 合并回 df。
     """
     state = st.session_state.get(editor_key)
 
-    # 没有 state 时再退回 editor_return
     if not isinstance(state, dict):
         if isinstance(editor_return, pd.DataFrame):
             return editor_return
@@ -220,9 +262,9 @@ def ensure_auth_table():
     auth_users 字段说明：
     - username: 主键
     - password_hash: 密码hash
-    - is_admin: 管理员（可管理账号/重置密码/新增删除账号）
+    - is_admin: 管理员
     - is_super_admin: 主管理员（可配置普通账号可见板块）
-    - allowed_pages_json: 普通账号可见板块（JSON 数组），管理员默认忽略=全部可见
+    - allowed_pages_json: 普通账号可见板块（JSON 数组）
     """
     with engine.begin() as conn:
         conn.execute(
@@ -240,7 +282,6 @@ def ensure_auth_table():
             )
         )
 
-    # 兼容旧库：若缺列则补齐
     with engine.begin() as conn:
         cols = conn.execute(text("PRAGMA table_info(auth_users)")).mappings().all()
         existing = {str(c.get("name")) for c in cols}
@@ -277,7 +318,6 @@ def bootstrap_auth_users_if_needed():
     with engine.begin() as conn:
         count = conn.execute(text("SELECT COUNT(*) FROM auth_users")).scalar() or 0
         if int(count) > 0:
-            # 兜底：确保 admin 至少是主管理员
             row = conn.execute(
                 text("SELECT username, is_super_admin FROM auth_users WHERE username='admin'")
             ).mappings().first()
@@ -415,7 +455,6 @@ def create_auth_user(username: str, password: str, is_admin: bool = False, is_su
     if get_auth_user(clean_user):
         return False, "该账号已存在"
 
-    # 主管理员必须同时是管理员
     if is_super_admin:
         is_admin = True
 
@@ -802,7 +841,10 @@ def save_auditor_editor(df: pd.DataFrame):
             obj.travel_days = _safe_int(row.get("差旅天数"), 0) or 0
             obj.continuous_days = _safe_int(row.get("连续天数"), 0) or 0
             obj.last_task_end_city = str(row.get("上次结束城市", "") or "").strip() or None
-            obj.last_task_end_date = safe_parse_date(str(row.get("上次结束日期", "") or "")) or date.today()
+
+            # ✅ 关键：不再 str()，直接交给 safe_parse_date
+            obj.last_task_end_date = safe_parse_date(row.get("上次结束日期", None)) or date.today()
+
         return safe_commit(db, "保存稽查员表格编辑")
 
 
@@ -830,12 +872,19 @@ def save_task_editor(df: pd.DataFrame):
             obj.preferred_experts = str(row.get("软指定", "") or "").strip() or None
             obj.site_city = str(row.get("城市", "")).strip()
 
-            sd = safe_parse_date(str(row.get("开始", "") or ""))
-            ed = safe_parse_date(str(row.get("结束", "") or ""))
+            # ✅ 关键：不再 str()，直接交给 safe_parse_date（可吃 Timestamp/Excel序列号）
+            sd = safe_parse_date(row.get("开始", None))
+            ed = safe_parse_date(row.get("结束", None))
             if sd:
                 obj.start_date = sd
             if ed:
                 obj.end_date = ed
+
+            # ✅ 拦截：避免保存后出现 结束 < 开始
+            if obj.end_date and obj.start_date and obj.end_date < obj.start_date:
+                st.error(f"任务#{obj.id}：结束日期不能早于开始日期（{obj.start_date} ~ {obj.end_date}）")
+                db.rollback()
+                return False
 
         return safe_commit(db, "保存任务表格编辑")
 
@@ -864,7 +913,7 @@ def render_data_cleanup():
 # -------------------- 侧边栏 --------------------
 st.sidebar.title(APP_NAME)
 
-# DB 诊断：显示当前数据库路径（你已验证会显示 /mount/...）
+# DB 诊断：显示当前数据库路径
 from app import db as dbmod
 
 p = Path(str(getattr(dbmod, "DB_FILE", "")))
@@ -1160,7 +1209,6 @@ elif page == "稽查员管理":
         st.caption("支持在表格内直接修改；勾选“删除”后点保存，即可删除对应人员。")
         df = pd.DataFrame(rows)
 
-        # ✅ 关键：form 包住 data_editor + 保存按钮（保证编辑单元格提交）
         with st.form("auditor_editor_form", clear_on_submit=False):
             editor_return = st.data_editor(
                 df,
@@ -1170,7 +1218,7 @@ elif page == "稽查员管理":
                 key="auditor_editor",
                 column_config={
                     "ID": st.column_config.NumberColumn(disabled=True),
-                    "上次结束日期": st.column_config.TextColumn(help="格式：YYYY-MM-DD"),
+                    "上次结束日期": st.column_config.TextColumn(help="格式：YYYY-MM-DD（也支持时间/Excel序列号）"),
                     "删除": st.column_config.CheckboxColumn(),
                 },
             )
@@ -1262,7 +1310,6 @@ elif page == "任务管理":
         st.caption("支持在表格内直接修改；勾选“删除”后点保存，即可删除对应任务。")
         df = pd.DataFrame(rows)
 
-        # ✅ 关键：form 包住 data_editor + 保存按钮（保证编辑单元格提交）
         with st.form("task_editor_form", clear_on_submit=False):
             editor_return = st.data_editor(
                 df,
@@ -1272,8 +1319,8 @@ elif page == "任务管理":
                 key="task_editor",
                 column_config={
                     "ID": st.column_config.NumberColumn(disabled=True),
-                    "开始": st.column_config.TextColumn(help="格式：YYYY-MM-DD"),
-                    "结束": st.column_config.TextColumn(help="格式：YYYY-MM-DD"),
+                    "开始": st.column_config.TextColumn(help="格式：YYYY-MM-DD（也支持时间/Excel序列号）"),
+                    "结束": st.column_config.TextColumn(help="格式：YYYY-MM-DD（也支持时间/Excel序列号）"),
                     "删除": st.column_config.CheckboxColumn(),
                 },
             )
@@ -1281,7 +1328,8 @@ elif page == "任务管理":
 
         if submitted:
             final_df = materialize_editor_df(df, "task_editor", editor_return)
-            if save_task_editor(pd.DataFrame(final_df)):
+            ok = save_task_editor(pd.DataFrame(final_df))
+            if ok:
                 st.success("任务数据已更新")
                 st.session_state.pop("task_editor", None)
                 st.rerun()
@@ -1475,17 +1523,15 @@ elif page == "模板导入":
                     base_city = str(r[base_i] or "").strip()
                     if not name or not base_city:
                         continue
+
                     gender = str(r[find_idx(headers, ["性别(男/女)"])] if find_idx(headers, ["性别(男/女)"]) is not None else "女")
                     group_level = str(r[find_idx(headers, ["等级(A/B/C)"])] if find_idx(headers, ["等级(A/B/C)"]) is not None else "B")
                     can_lead_raw = str(r[find_idx(headers, ["可带队(是/否)"])] if find_idx(headers, ["可带队(是/否)"]) is not None else "是")
+
                     last_date_idx = find_idx(headers, ["上次结束日期(YYYY-MM-DD)(必填)"])
-                    last_date_raw = r[last_date_idx] if last_date_idx is not None else ""
-                    if isinstance(last_date_raw, datetime):
-                        last_date = last_date_raw.date()
-                    elif isinstance(last_date_raw, date):
-                        last_date = last_date_raw
-                    else:
-                        last_date = safe_parse_date(str(last_date_raw or "")) or date.today()
+                    last_date_raw = r[last_date_idx] if last_date_idx is not None else None
+                    last_date = safe_parse_date(last_date_raw) or date.today()
+
                     rec = db.query(Auditor).filter(Auditor.name == name).first()
                     if rec:
                         rec.gender = gender or "女"
@@ -1531,22 +1577,17 @@ elif page == "模板导入":
                     ed_i = find_idx(headers, ["结束日期(YYYY-MM-DD)(必填)"])
                     if None in (proj_i, city_i, sd_i, ed_i):
                         continue
+
                     project_name = str(r[proj_i] or "").strip()
                     site_city = str(r[city_i] or "").strip()
-                    if isinstance(r[sd_i], datetime):
-                        start_d = r[sd_i].date()
-                    elif isinstance(r[sd_i], date):
-                        start_d = r[sd_i]
-                    else:
-                        start_d = safe_parse_date(str(r[sd_i] or ""))
-                    if isinstance(r[ed_i], datetime):
-                        end_d = r[ed_i].date()
-                    elif isinstance(r[ed_i], date):
-                        end_d = r[ed_i]
-                    else:
-                        end_d = safe_parse_date(str(r[ed_i] or ""))
+                    start_d = safe_parse_date(r[sd_i])
+                    end_d = safe_parse_date(r[ed_i])
+
                     if not project_name or not site_city or not start_d or not end_d:
                         continue
+                    if end_d < start_d:
+                        continue
+
                     rec = db.query(Task).filter(Task.project_name == project_name, Task.start_date == start_d, Task.site_city == site_city).first()
                     if rec:
                         rec.end_date = end_d
@@ -1809,7 +1850,6 @@ elif page == "账号管理":
                             else:
                                 st.error(msg)
 
-        # 主管理员：配置普通用户可见板块
         st.divider()
         if not is_super_admin:
             st.info("提示：只有【主管理员】可以配置普通账号的可见板块。")
