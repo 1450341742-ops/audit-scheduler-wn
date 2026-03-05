@@ -1,3 +1,4 @@
+# streamlit_app.py
 import csv
 import io
 import json
@@ -28,6 +29,7 @@ from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 
 APP_NAME = "万宁睿和稽查排班"
 st.set_page_config(page_title=APP_NAME, layout="wide")
+
 
 # -------------------- 初始化 --------------------
 Base.metadata.create_all(bind=engine)
@@ -78,7 +80,7 @@ def safe_commit(db: Session, context: str = "") -> bool:
         st.error(
             f"数据库写入失败（IntegrityError）。\n"
             f"位置：{context}\n"
-            f"常见原因：城市/距离唯一约束重复、或导入数据中有重复行。\n"
+            f"常见原因：唯一约束重复（城市/距离）、导入数据重复、或并发写入。\n"
             f"（Streamlit Cloud 会脱敏，建议点 Manage app -> Logs 看完整错误）"
         )
         st.exception(e)
@@ -88,7 +90,7 @@ def safe_commit(db: Session, context: str = "") -> bool:
 # -------------------- Seed：城市距离/坐标（避免唯一约束重复） --------------------
 def seed_city_distances_if_needed(db: Session):
     """
-    CityDistance 有 UniqueConstraint(from_city,to_city)；
+    CityDistance 有 UniqueConstraint(from_city,to_city)
     这里做：strip + seen + 逐条 flush 捕获，避免批量 commit 时难定位。
     """
     seen = set()
@@ -110,10 +112,9 @@ def seed_city_distances_if_needed(db: Session):
 
         db.add(CityDistance(from_city=a, to_city=b, km=float(km)))
         try:
-            db.flush()  # 提前暴露唯一约束问题
+            db.flush()
         except IntegrityError:
             db.rollback()
-            # 忽略重复（可能并发/历史数据导致）
             continue
 
     safe_commit(db, "seed_city_distances_if_needed")
@@ -345,6 +346,7 @@ if "is_admin" not in st.session_state:
 if not st.session_state["logged_in"]:
     render_login()
 
+
 # -------------------- 常量 --------------------
 STATUS_MAP = {"在岗": "active", "请假": "leave", "冻结": "frozen"}
 STATUS_MAP_REV = {v: k for k, v in STATUS_MAP.items()}
@@ -472,15 +474,34 @@ def build_ics_events(db: Session, auditor_id: int | None = None):
 
 # -------------------- 工具函数：业务 --------------------
 def assign_team_to_task(db: Session, task: Task, leader_id: int, member_ids: list[int]):
+    """
+    ✅ 防重复：
+    - 若该 task 已存在任何 Schedule，则禁止再次排班（避免同一任务在日历展示两次/多次）
+    - 若同一 task+auditor 已存在 Schedule，则不重复写入
+    """
+    # ---- 防重复：同一任务若已排班，则拒绝再次指派 ----
+    if db.query(Schedule).filter(Schedule.task_id == task.id).first():
+        raise ValueError(f"任务#{task.id} 已排班，禁止重复排班")
+
     start_date = task.start_date
     end_date = task.end_date or (task.start_date + timedelta(days=max(1, int(task.required_days or 1)) - 1))
 
     def add_schedule(auditor_id: int, role: str):
+        # ---- 防重复：同一任务同一人不重复写入 ----
+        exists = db.query(Schedule).filter(
+            Schedule.task_id == task.id,
+            Schedule.auditor_id == auditor_id,
+        ).first()
+        if exists:
+            return
+
         auditor = db.query(Auditor).filter(Auditor.id == auditor_id).first()
         if not auditor:
             return
+
         from_city = compute_from_city(auditor, task)
         km = get_distance_km(db, from_city, task.site_city)
+
         db.add(
             Schedule(
                 task_id=task.id,
@@ -495,6 +516,8 @@ def assign_team_to_task(db: Session, task: Task, leader_id: int, member_ids: lis
                 status="confirmed",
             )
         )
+
+        # 更新人员统计
         auditor.monthly_cases = int(auditor.monthly_cases or 0) + 1
         days = (end_date - start_date).days + 1
         auditor.travel_days = int(auditor.travel_days or 0) + max(0, days)
@@ -511,10 +534,14 @@ def assign_team_to_task(db: Session, task: Task, leader_id: int, member_ids: lis
 def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
     if d2 < d1:
         d1, d2 = d2, d1
+
+    # ✅ 已排过的任务（Schedule里出现过的 task_id）一律跳过
     scheduled_task_ids = {tid for (tid,) in db.query(Schedule.task_id).distinct().all()}
+
     tasks = db.query(Task).filter(Task.start_date >= d1, Task.start_date <= d2).all()
     tasks = [t for t in tasks if t.id not in scheduled_task_ids]
     tasks.sort(key=lambda t: (0 if t.need_expert else 1, -int(t.required_headcount or 1), t.start_date))
+
     auditors = db.query(Auditor).all()
     report = {"assigned": [], "skipped": [], "batch_week_counts": {}}
 
@@ -560,7 +587,7 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
                 if best_obj is None or obj < best_obj:
                     best_obj, best_team = obj, cand_team
 
-                extras = member_pool[need_n : need_n + 6]
+                extras = member_pool[need_n: need_n + 6]
                 for ex in extras:
                     trial_members = base_members[:-1] + [ex] if base_members else [ex]
                     cand_team2 = TeamProposal(
@@ -582,7 +609,13 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
 
         leader_id = int(team.leader.auditor_id)
         member_ids = [int(m.auditor_id) for m in team.members]
-        assign_team_to_task(db, t, leader_id, member_ids)
+
+        try:
+            assign_team_to_task(db, t, leader_id, member_ids)
+        except ValueError as e:
+            report["skipped"].append({"task_id": t.id, "project": t.project_name, "reason": str(e)})
+            continue
+
         for aid in [leader_id] + member_ids:
             report["batch_week_counts"][aid] = int(report["batch_week_counts"].get(aid, 0)) + 1
 
@@ -598,6 +631,7 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
                 "members": [m.auditor_name for m in team.members],
             }
         )
+
     return report
 
 
@@ -635,6 +669,7 @@ page = st.sidebar.radio(
         "模板导入",
         "日历视图",
         "账号管理",
+        "数据清理",
     ],
     key="nav_radio",
 )
@@ -645,10 +680,12 @@ st.sidebar.caption(f"当前位置：{page}")
 # 右侧最上方标题：随导航变化
 st.title(f"{APP_NAME}｜{page}")
 
+
 # -------------------- 页面：智能排班 --------------------
 if page == "智能排班":
     st.subheader("智能排班")
     st.caption("先按硬约束筛选，再按“距离优先 + 适度负荷均衡”评分推荐。")
+    st.caption("✅ 已启用：上次结束日期与任务开始日期冲突拦截（含缓冲日）；已排任务禁止重复排班。")
 
     with db_session() as db:
         tasks = db.query(Task).order_by(Task.id.desc()).all()
@@ -691,10 +728,15 @@ if page == "智能排班":
                 schedules_all = db.query(Schedule).all()
                 candidates = build_candidates(db, task, auditors, schedules_all) if task else []
                 team = propose_team(task, candidates) if task else None
+
+                # ✅ 若任务已排过，直接提示（避免用户以为还能确认）
+                already_scheduled = bool(db.query(Schedule).filter(Schedule.task_id == selected_task_id).first())
+
                 st.session_state["recommend_result"] = {
                     "task_id": selected_task_id,
                     "candidates": candidates[:25],
                     "team": team,
+                    "already_scheduled": already_scheduled,
                     "error": None if team else "无可用团队方案：检查负责人/专家A组/人数不足/指定人冲突/每周上限/缓冲日冲突等。",
                 }
             st.rerun()
@@ -707,6 +749,9 @@ if page == "智能排班":
             st.info(
                 f"已选择：{task.project_name}（{task.site_city}，{d2s(task.start_date)}，{task.required_days}天，{task.required_headcount}人；需要A带队：{'是' if task.need_expert else '否'}）"
             )
+
+            if rec.get("already_scheduled"):
+                st.warning("该任务已排班：系统已禁止重复排班。如需调整，请先删除该任务对应的排班记录后再重新排。")
 
             if rec.get("error"):
                 st.error(rec["error"])
@@ -733,10 +778,18 @@ if page == "智能排班":
                 st.caption(f"{team.notes}｜团队评分 {team.team_score}")
                 default_member_ids = ",".join([str(m.auditor_id) for m in team.members])
                 member_ids_text = st.text_input(
-                    "确认指派前，可手工调整组员ID（逗号分隔）", value=default_member_ids, key="member_ids_text"
+                    "确认指派前，可手工调整组员ID（逗号分隔）",
+                    value=default_member_ids,
+                    key="member_ids_text",
+                    disabled=bool(rec.get("already_scheduled")),
                 )
 
-                if st.button("确认指派", type="primary", key="confirm_assign_btn"):
+                if st.button(
+                    "确认指派",
+                    type="primary",
+                    key="confirm_assign_btn",
+                    disabled=bool(rec.get("already_scheduled")),
+                ):
                     ids = [x for x in re.split(r"[，,\s]+", member_ids_text.strip()) if x.strip()]
                     member_ids = []
                     for x in ids:
@@ -744,11 +797,18 @@ if page == "智能排班":
                             member_ids.append(int(x))
                         except Exception:
                             pass
+
                     with db_session() as db:
                         task = db.query(Task).filter(Task.id == selected_task_id).first()
-                        assign_team_to_task(db, task, int(team.leader.auditor_id), member_ids)
+                        try:
+                            assign_team_to_task(db, task, int(team.leader.auditor_id), member_ids)
+                        except ValueError as e:
+                            st.error(str(e))
+                            st.stop()
+
                         if not safe_commit(db, context=f"确认指派 commit：task#{selected_task_id}"):
                             st.stop()
+
                     st.success("已确认指派，并已自动更新 last_city / last_date。")
                     st.session_state.pop("recommend_result", None)
                     st.rerun()
@@ -792,10 +852,12 @@ if page == "智能排班":
             st.success("已删除")
             st.rerun()
 
+
 # -------------------- 页面：批量排班 --------------------
 elif page == "批量排班":
     st.subheader("批量排班")
     st.caption("只会处理“未排过”的任务；按 need_expert 优先 > 人数多优先 > 开始日期早 排序。")
+    st.caption("✅ 已启用：上次结束日期冲突拦截；已排任务禁止重复排班。")
 
     c1, c2, c3 = st.columns([1, 1, 1])
     date_start = c1.date_input("开始日期", value=date.today(), key="batch_start")
@@ -833,6 +895,7 @@ elif page == "批量排班":
             else:
                 st.info("无")
 
+
 # -------------------- 页面：稽查员管理 --------------------
 elif page == "稽查员管理":
     st.subheader("稽查员管理")
@@ -840,9 +903,9 @@ elif page == "稽查员管理":
     with st.form("auditor_form", clear_on_submit=True):
         c1, c2, c3, c4 = st.columns(4)
         name = c1.text_input("姓名*")
-        gender = c2.selectbox("性别*", ["女", "男"], index=0)  # ✅ 默认女
+        gender = c2.selectbox("性别*", ["女", "男"], index=0)
         group_level = c3.selectbox("等级*", ["A", "B", "C"], index=1)
-        can_lead = c4.selectbox("可带队*", ["是", "否"], index=0)  # ✅ 默认是
+        can_lead = c4.selectbox("可带队*", ["是", "否"], index=0)
 
         c5, c6, c7, c8 = st.columns(4)
         base_city = c5.text_input("常驻城市*")
@@ -854,7 +917,7 @@ elif page == "稽查员管理":
         travel_days = c9.number_input("本月差旅天数", min_value=0, value=0, step=1)
         continuous_days = c10.number_input("连续工作天数", min_value=0, value=0, step=1)
         last_city = c11.text_input("上次结束城市（可空）")
-        last_date = c12.date_input("上次结束日期*（必填）", value=date.today())  # ✅ 必填日历
+        last_date = c12.date_input("上次结束日期*（必填）", value=date.today())
 
         if st.form_submit_button("新增稽查员", type="primary"):
             if not name.strip() or not base_city.strip():
@@ -926,6 +989,7 @@ elif page == "稽查员管理":
             st.success("已删除")
             st.rerun()
 
+
 # -------------------- 页面：任务管理 --------------------
 elif page == "任务管理":
     st.subheader("任务管理")
@@ -948,7 +1012,7 @@ elif page == "任务管理":
         start_date = c10.date_input("开始日期*", value=date.today())
 
         default_end = start_date + timedelta(days=max(1, int(required_days)) - 1)
-        end_date = st.date_input("结束日期*（必填）", value=default_end)  # ✅ 必填日历
+        end_date = st.date_input("结束日期*（必填）", value=default_end)
 
         if st.form_submit_button("新增任务", type="primary"):
             if not project_name.strip() or not site_city.strip():
@@ -1020,6 +1084,7 @@ elif page == "任务管理":
             st.success("已删除")
             st.rerun()
 
+
 # -------------------- 页面：城市距离 --------------------
 elif page == "城市距离":
     st.subheader("城市距离")
@@ -1063,6 +1128,7 @@ elif page == "城市距离":
                         st.stop()
             st.success("已删除")
             st.rerun()
+
 
 # -------------------- 页面：城市坐标 --------------------
 elif page == "城市坐标":
@@ -1150,6 +1216,7 @@ elif page == "城市坐标":
             st.success("已删除")
             st.rerun()
 
+
 # -------------------- 页面：模板导入 --------------------
 elif page == "模板导入":
     st.subheader("模板导入")
@@ -1178,7 +1245,7 @@ elif page == "模板导入":
     bio_a = make_xlsx_template(headers_a, [explain_a] + example_a, sheet_name="稽查员")
     st.download_button("下载稽查员模板（XLSX）", bio_a.getvalue(), file_name="稽查员模板.xlsx", key="dl_aud_tpl")
 
-    # 下载：任务模板（结束日期必填；不填则按任务天数推算）
+    # 下载：任务模板（结束日期不填则按任务天数推算）
     headers_t = [
         "项目名称",
         "客户/申办方",
@@ -1190,7 +1257,7 @@ elif page == "模板导入":
         "软指定专家/老师(可空)",
         "中心城市",
         "开始日期(YYYY-MM-DD)",
-        "结束日期(YYYY-MM-DD)(必填;不填则按天数推算)",
+        "结束日期(YYYY-MM-DD)(可空;不填则按天数推算)",
     ]
     explain_t = ["必填", "可空", "默认否", "默认1", "默认1", "默认不限", "可空", "可空(加分优先)", "必填", "必填", "建议填写；为空自动推算"]
     example_t = [
@@ -1237,9 +1304,9 @@ elif page == "模板导入":
                         if not name:
                             continue
 
-                        gender = str(gv("gender", "女") or "女").strip() or "女"  # ✅ 默认女
+                        gender = str(gv("gender", "女") or "女").strip() or "女"
                         group_level = str(gv("group_level", "B") or "B").strip().upper() or "B"
-                        can_lead_team_raw = str(gv("can_lead_team", "是") or "是").strip()  # ✅ 默认是
+                        can_lead_team_raw = str(gv("can_lead_team", "是") or "是").strip()
                         base_city = str(gv("base_city", "") or "").strip()
                         if not base_city:
                             st.error(f"第 {excel_row_idx} 行：常驻城市必填（{name}）")
@@ -1260,7 +1327,6 @@ elif page == "模板导入":
                         else:
                             last_date = safe_parse_date(str(last_date_raw or ""))
 
-                        # ✅ 上次结束日期必填：为空则报错（也可改为 date.today() 自动兜底）
                         if last_date is None:
                             st.error(f"第 {excel_row_idx} 行：上次结束日期必填（{name}）")
                             st.stop()
@@ -1333,7 +1399,7 @@ elif page == "模板导入":
                     "preferred_experts": ["软指定专家/老师(可空)", "preferred_experts"],
                     "site_city": ["中心城市", "site_city"],
                     "start_date": ["开始日期(YYYY-MM-DD)", "start_date"],
-                    "end_date": ["结束日期(YYYY-MM-DD)(必填;不填则按天数推算)", "结束日期(YYYY-MM-DD)", "end_date"],
+                    "end_date": ["结束日期(YYYY-MM-DD)(可空;不填则按天数推算)", "结束日期(YYYY-MM-DD)", "end_date"],
                 }
 
                 imported = 0
@@ -1379,7 +1445,7 @@ elif page == "模板导入":
                         else:
                             end_d = safe_parse_date(str(ed_raw or ""))
 
-                        # ✅ 结束日期必填：为空则按 required_days 推算（满足你“必填”的业务要求）
+                        # 若结束日期为空：按 required_days 推算
                         if end_d is None:
                             end_d = start_d + timedelta(days=max(1, int(required_days or 1)) - 1)
 
@@ -1433,6 +1499,7 @@ elif page == "模板导入":
 
                 st.success(f"已导入 / 更新 {imported} 条任务记录。")
                 st.rerun()
+
 
 # -------------------- 页面：账号管理 --------------------
 elif page == "账号管理":
@@ -1523,10 +1590,12 @@ elif page == "账号管理":
             else:
                 st.info("当前没有可删除的账号（默认 admin 和当前登录账号不可删除）。")
 
+
 # -------------------- 页面：日历视图 --------------------
 elif page == "日历视图":
     st.subheader("日历视图")
     st.caption("按月查看排班、节假日标识，并支持导出 ICS 日历。")
+    st.caption("✅ 日历已做“去重展示”，即使历史数据有重复，也不会显示两次。")
 
     with db_session() as db:
         auditors = db.query(Auditor).order_by(Auditor.name.asc()).all()
@@ -1536,8 +1605,16 @@ elif page == "日历视图":
             .order_by(Schedule.start_date.asc())
             .all()
         )
+
         all_schedules_rows = []
+        seen = set()
         for s in all_schedules:
+            # ✅ 去重：同一 task+auditor+role+起止 日期，展示一次
+            key = (s.task_id, s.auditor_id, s.role, s.start_date, s.end_date)
+            if key in seen:
+                continue
+            seen.add(key)
+
             all_schedules_rows.append(
                 {
                     "id": s.id,
@@ -1642,7 +1719,6 @@ elif page == "日历视图":
         )
     show_table(rows, 320)
 
-    # ✅ 导出 Excel（本月明细）
     if rows:
         headers_excel = list(rows[0].keys())
         excel_rows = [list(r.values()) for r in rows]
@@ -1665,3 +1741,62 @@ elif page == "日历视图":
                 file_name=f"wnrh_auditor_{auditor_id}.ics",
                 key="dl_one_ics",
             )
+
+
+# -------------------- 页面：数据清理 --------------------
+elif page == "数据清理":
+    st.subheader("数据清理（无数据初始化/重置用）")
+    st.warning("⚠️ 该操作不可恢复。建议仅在“没有正式数据”时使用。默认不会删除登录账号 auth_users。")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("### 清空业务数据（推荐）")
+        st.caption("删除：schedules / tasks / auditors（保留：auth_users、城市库）")
+        if st.button("清空业务数据", type="primary", key="purge_business"):
+            with db_session() as db:
+                db.execute(text("DELETE FROM schedules"))
+                db.execute(text("DELETE FROM tasks"))
+                db.execute(text("DELETE FROM auditors"))
+                if not safe_commit(db, "清空业务数据"):
+                    st.stop()
+            st.success("已清空：schedules / tasks / auditors")
+            st.rerun()
+
+    with col2:
+        st.markdown("### 清空全部数据（谨慎）")
+        st.caption("删除：schedules / tasks / auditors / city_distances / cities（仍保留 auth_users）")
+        confirm = st.text_input("输入 PURGE_ALL 确认清空全部", key="purge_all_confirm")
+        if st.button("清空全部数据", key="purge_all_btn"):
+            if confirm != "PURGE_ALL":
+                st.error("请输入 PURGE_ALL 才会执行。")
+                st.stop()
+            with db_session() as db:
+                db.execute(text("DELETE FROM schedules"))
+                db.execute(text("DELETE FROM tasks"))
+                db.execute(text("DELETE FROM auditors"))
+                db.execute(text("DELETE FROM city_distances"))
+                db.execute(text("DELETE FROM cities"))
+                if not safe_commit(db, "清空全部数据"):
+                    st.stop()
+            st.success("已清空：业务数据 + 城市库（保留 auth_users）")
+            st.rerun()
+
+    st.divider()
+    st.markdown("### 当前表记录数（快速检查）")
+    with db_session() as db:
+        n_aud = db.query(Auditor).count()
+        n_task = db.query(Task).count()
+        n_sch = db.query(Schedule).count()
+        n_city = db.query(City).count()
+        n_dist = db.query(CityDistance).count()
+    st.write(
+        {
+            "auditors": n_aud,
+            "tasks": n_task,
+            "schedules": n_sch,
+            "cities": n_city,
+            "city_distances": n_dist,
+            "auth_users": "（不在 ORM 中展示，保留不删除）",
+        }
+    )
