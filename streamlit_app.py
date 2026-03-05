@@ -87,45 +87,47 @@ def safe_commit(db: Session, context: str = "") -> bool:
 # -------------------- ✅ 关键修复：兼容不同 Streamlit data_editor 返回值 --------------------
 def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_return):
     """
-    兼容 Streamlit 不同版本：
-    - 新版本：st.data_editor 返回编辑后的 DataFrame
-    - 部分版本：返回原始 DataFrame，修改内容在 st.session_state[editor_key] 里
+    ✅ 最终稳定版：永远优先使用 st.session_state[editor_key] 的改动
+    因为很多版本的 st.data_editor 即使返回 DataFrame，也可能不是“最终编辑值”。
     """
-    if isinstance(editor_return, pd.DataFrame):
-        return editor_return
-
     state = st.session_state.get(editor_key)
+
+    # 如果没有 state（极少数情况），再退回使用 editor_return
     if not isinstance(state, dict):
+        if isinstance(editor_return, pd.DataFrame):
+            return editor_return
         return original_df
 
     df = original_df.copy()
 
     # 1) edited_rows: {row_index: {col: value}}
-    edited_rows = state.get("edited_rows", {}) or {}
-    try:
-        for ridx, changes in edited_rows.items():
+    edited_rows = state.get("edited_rows") or {}
+    for ridx, changes in edited_rows.items():
+        try:
             ridx = int(ridx)
-            for col, val in (changes or {}).items():
-                if col in df.columns and 0 <= ridx < len(df):
-                    df.at[ridx, col] = val
-    except Exception:
-        pass
+        except Exception:
+            continue
+        if ridx < 0 or ridx >= len(df):
+            continue
+        for col, val in (changes or {}).items():
+            if col in df.columns:
+                df.at[ridx, col] = val
 
     # 2) deleted_rows: [row_index, ...]
-    deleted_rows = state.get("deleted_rows", []) or []
-    try:
-        if deleted_rows:
-            df = df.drop(index=[int(i) for i in deleted_rows if str(i).strip() != ""]).reset_index(drop=True)
-    except Exception:
-        pass
+    deleted_rows = state.get("deleted_rows") or []
+    if deleted_rows:
+        try:
+            df = df.drop(index=[int(i) for i in deleted_rows]).reset_index(drop=True)
+        except Exception:
+            pass
 
-    # 3) added_rows: [{col: val}, ...]（本项目默认不启用动态新增行，但这里兼容）
-    added_rows = state.get("added_rows", []) or []
-    try:
-        if added_rows:
+    # 3) added_rows: [{col: val}, ...]
+    added_rows = state.get("added_rows") or []
+    if added_rows:
+        try:
             df = pd.concat([df, pd.DataFrame(added_rows)], ignore_index=True)
-    except Exception:
-        pass
+        except Exception:
+            pass
 
     return df
 
@@ -853,18 +855,20 @@ def render_data_cleanup():
 
 # -------------------- 侧边栏 --------------------
 st.sidebar.title(APP_NAME)
+
+# DB 诊断（保留）
 from app import db as dbmod
-from pathlib import Path
-from datetime import datetime
 
 p = Path(str(getattr(dbmod, "DB_FILE", "")))
 st.sidebar.write("✅ 当前数据库文件：")
 st.sidebar.code(str(p))
-
 if p and p.exists():
-    st.sidebar.write(f"存在：True | 大小：{p.stat().st_size} bytes | 修改时间：{datetime.fromtimestamp(p.stat().st_mtime)}")
+    st.sidebar.write(
+        f"存在：True | 大小：{p.stat().st_size} bytes | 修改时间：{datetime.fromtimestamp(p.stat().st_mtime)}"
+    )
 else:
     st.sidebar.write("存在：False（说明还没生成/或路径不对）")
+
 st.sidebar.caption(f"当前用户：{st.session_state.get('login_user', '')}")
 
 if st.sidebar.button("退出登录", key="logout_btn"):
@@ -974,7 +978,9 @@ if page == "智能排班":
                     st.write("**组员：** 无")
                 st.caption(f"{team.notes}｜团队评分 {team.team_score}")
                 default_member_ids = ",".join([str(m.auditor_id) for m in team.members])
-                member_ids_text = st.text_input("确认指派前，可手工调整组员ID（逗号分隔）", value=default_member_ids, key="member_ids_text")
+                member_ids_text = st.text_input(
+                    "确认指派前，可手工调整组员ID（逗号分隔）", value=default_member_ids, key="member_ids_text"
+                )
                 if st.button("确认指派", type="primary", key="confirm_assign_btn"):
                     ids = [x for x in re.split(r"[，,\s]+", member_ids_text.strip()) if x.strip()]
                     member_ids = []
@@ -1150,6 +1156,7 @@ elif page == "稽查员管理":
             df,
             use_container_width=True,
             hide_index=True,
+            num_rows="fixed",
             key="auditor_editor",
             column_config={
                 "ID": st.column_config.NumberColumn(disabled=True),
@@ -1162,7 +1169,6 @@ elif page == "稽查员管理":
             final_df = materialize_editor_df(df, "auditor_editor", editor_return)
             if save_auditor_editor(pd.DataFrame(final_df)):
                 st.success("稽查员数据已更新")
-                # ✅ 清掉 editor 缓存，避免下一次加载被旧状态覆盖
                 st.session_state.pop("auditor_editor", None)
                 st.rerun()
     else:
@@ -1248,6 +1254,7 @@ elif page == "任务管理":
             df,
             use_container_width=True,
             hide_index=True,
+            num_rows="fixed",
             key="task_editor",
             column_config={
                 "ID": st.column_config.NumberColumn(disabled=True),
@@ -1261,7 +1268,6 @@ elif page == "任务管理":
             final_df = materialize_editor_df(df, "task_editor", editor_return)
             if save_task_editor(pd.DataFrame(final_df)):
                 st.success("任务数据已更新")
-                # ✅ 清掉 editor 缓存，避免下一次加载被旧状态覆盖
                 st.session_state.pop("task_editor", None)
                 st.rerun()
     else:
@@ -1756,9 +1762,7 @@ elif page == "账号管理":
                     role_cn = "主管理员"
                 elif int(u.get("is_admin", 0)) == 1:
                     role_cn = "管理员"
-                rows.append(
-                    {"账号": u.get("username"), "权限": role_cn, "创建时间": u.get("created_at") or ""}
-                )
+                rows.append({"账号": u.get("username"), "权限": role_cn, "创建时间": u.get("created_at") or ""})
             show_table(rows, 260)
         else:
             st.info("暂无账号")
