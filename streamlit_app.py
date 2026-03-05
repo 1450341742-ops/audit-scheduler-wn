@@ -132,12 +132,37 @@ with db_session() as db:
     seed_cities_if_needed(db)
 
 
-# -------------------- 登录认证 --------------------
+# -------------------- 登录认证 + 权限（主管理员可配置普通用户可见板块） --------------------
+ALL_PAGES = [
+    "智能排班",
+    "批量排班",
+    "稽查员管理",
+    "任务管理",
+    "城市距离",
+    "城市坐标",
+    "模板导入",
+    "日历视图",
+    "账号管理",
+    "数据清理",
+]
+
+# 普通用户默认可见板块（可由主管理员自定义覆盖）
+DEFAULT_NORMAL_PAGES = ["任务管理", "稽查员管理", "日历视图"]
+
+
 def hash_password(password: str) -> str:
     return hashlib.sha256(str(password).encode("utf-8")).hexdigest()
 
 
 def ensure_auth_table():
+    """
+    auth_users 字段说明：
+    - username: 主键
+    - password_hash: 密码hash
+    - is_admin: 管理员（可管理账号/重置密码/新增删除账号）
+    - is_super_admin: 主管理员（可配置普通账号可见板块）
+    - allowed_pages_json: 普通账号可见板块（JSON 数组），管理员默认忽略=全部可见
+    """
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -146,11 +171,23 @@ def ensure_auth_table():
                     username TEXT PRIMARY KEY,
                     password_hash TEXT NOT NULL,
                     is_admin INTEGER NOT NULL DEFAULT 0,
+                    is_super_admin INTEGER NOT NULL DEFAULT 0,
+                    allowed_pages_json TEXT,
                     created_at TEXT
                 )
                 """
             )
         )
+
+    # 兼容旧库：若缺列则补齐
+    with engine.begin() as conn:
+        cols = conn.execute(text("PRAGMA table_info(auth_users)")).mappings().all()
+        existing = {str(c.get("name")) for c in cols}
+
+        if "is_super_admin" not in existing:
+            conn.execute(text("ALTER TABLE auth_users ADD COLUMN is_super_admin INTEGER NOT NULL DEFAULT 0"))
+        if "allowed_pages_json" not in existing:
+            conn.execute(text("ALTER TABLE auth_users ADD COLUMN allowed_pages_json TEXT"))
 
 
 def _bootstrap_seed_users() -> dict[str, str]:
@@ -180,23 +217,37 @@ def bootstrap_auth_users_if_needed():
     with engine.begin() as conn:
         count = conn.execute(text("SELECT COUNT(*) FROM auth_users")).scalar() or 0
         if int(count) > 0:
+            # 兜底：确保 admin 至少是主管理员
+            row = conn.execute(
+                text("SELECT username, is_super_admin FROM auth_users WHERE username='admin'")
+            ).mappings().first()
+            if row and int(row.get("is_super_admin", 0)) != 1:
+                conn.execute(text("UPDATE auth_users SET is_admin=1, is_super_admin=1 WHERE username='admin'"))
             return
+
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for username, password in _bootstrap_seed_users().items():
             clean_user = str(username).strip()
             if not clean_user:
                 continue
+
+            is_admin = 1 if clean_user == "admin" else 0
+            is_super = 1 if clean_user == "admin" else 0
+            allowed = None if is_admin else json.dumps(DEFAULT_NORMAL_PAGES, ensure_ascii=False)
+
             conn.execute(
                 text(
                     """
-                    INSERT INTO auth_users (username, password_hash, is_admin, created_at)
-                    VALUES (:username, :password_hash, :is_admin, :created_at)
+                    INSERT INTO auth_users (username, password_hash, is_admin, is_super_admin, allowed_pages_json, created_at)
+                    VALUES (:username, :password_hash, :is_admin, :is_super_admin, :allowed_pages_json, :created_at)
                     """
                 ),
                 {
                     "username": clean_user,
                     "password_hash": hash_password(str(password)),
-                    "is_admin": 1 if clean_user == "admin" else 0,
+                    "is_admin": is_admin,
+                    "is_super_admin": is_super,
+                    "allowed_pages_json": allowed,
                     "created_at": now,
                 },
             )
@@ -206,7 +257,13 @@ def list_auth_users() -> list[dict]:
     ensure_auth_table()
     with engine.begin() as conn:
         rows = conn.execute(
-            text("SELECT username, is_admin, created_at FROM auth_users ORDER BY is_admin DESC, username ASC")
+            text(
+                """
+                SELECT username, is_admin, is_super_admin, allowed_pages_json, created_at
+                FROM auth_users
+                ORDER BY is_super_admin DESC, is_admin DESC, username ASC
+                """
+            )
         ).mappings().all()
     return [dict(r) for r in rows]
 
@@ -218,13 +275,73 @@ def get_auth_user(username: str) -> Optional[dict]:
         return None
     with engine.begin() as conn:
         row = conn.execute(
-            text("SELECT username, password_hash, is_admin, created_at FROM auth_users WHERE username = :username"),
+            text(
+                """
+                SELECT username, password_hash, is_admin, is_super_admin, allowed_pages_json, created_at
+                FROM auth_users
+                WHERE username = :username
+                """
+            ),
             {"username": clean_user},
         ).mappings().first()
     return dict(row) if row else None
 
 
-def create_auth_user(username: str, password: str, is_admin: bool = False) -> tuple[bool, str]:
+def _normalize_pages(pages: list[str]) -> list[str]:
+    seen = set()
+    out = []
+    for p in pages or []:
+        p = str(p).strip()
+        if not p:
+            continue
+        if p not in ALL_PAGES:
+            continue
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+def get_user_allowed_pages(username: str) -> list[str]:
+    u = get_auth_user(username)
+    if not u:
+        return DEFAULT_NORMAL_PAGES[:]
+    if int(u.get("is_admin", 0)) == 1:
+        return ALL_PAGES[:]  # 管理员默认全功能
+    raw = u.get("allowed_pages_json") or ""
+    try:
+        arr = json.loads(raw) if raw else []
+        if isinstance(arr, list):
+            pages = _normalize_pages(arr)
+            return pages if pages else DEFAULT_NORMAL_PAGES[:]
+    except Exception:
+        pass
+    return DEFAULT_NORMAL_PAGES[:]
+
+
+def set_user_allowed_pages(username: str, pages: list[str]) -> tuple[bool, str]:
+    ensure_auth_table()
+    clean_user = str(username or "").strip()
+    if not clean_user:
+        return False, "账号不能为空"
+    u = get_auth_user(clean_user)
+    if not u:
+        return False, "账号不存在"
+    if int(u.get("is_admin", 0)) == 1:
+        return False, "管理员账号默认全功能，无需设置可见板块"
+    pages = _normalize_pages(pages)
+    if not pages:
+        return False, "至少勾选1个可见板块"
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE auth_users SET allowed_pages_json = :v WHERE username = :username"),
+            {"v": json.dumps(pages, ensure_ascii=False), "username": clean_user},
+        )
+    return True, "已保存可见板块"
+
+
+def create_auth_user(username: str, password: str, is_admin: bool = False, is_super_admin: bool = False) -> tuple[bool, str]:
     ensure_auth_table()
     clean_user = str(username or "").strip()
     if not clean_user:
@@ -237,18 +354,27 @@ def create_auth_user(username: str, password: str, is_admin: bool = False) -> tu
         return False, "密码至少6位"
     if get_auth_user(clean_user):
         return False, "该账号已存在"
+
+    # 主管理员必须同时是管理员
+    if is_super_admin:
+        is_admin = True
+
+    allowed = None if is_admin else json.dumps(DEFAULT_NORMAL_PAGES, ensure_ascii=False)
+
     with engine.begin() as conn:
         conn.execute(
             text(
                 """
-                INSERT INTO auth_users (username, password_hash, is_admin, created_at)
-                VALUES (:username, :password_hash, :is_admin, :created_at)
+                INSERT INTO auth_users (username, password_hash, is_admin, is_super_admin, allowed_pages_json, created_at)
+                VALUES (:username, :password_hash, :is_admin, :is_super_admin, :allowed_pages_json, :created_at)
                 """
             ),
             {
                 "username": clean_user,
                 "password_hash": hash_password(password),
                 "is_admin": 1 if is_admin else 0,
+                "is_super_admin": 1 if is_super_admin else 0,
+                "allowed_pages_json": allowed,
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
         )
@@ -299,7 +425,7 @@ bootstrap_auth_users_if_needed()
 def render_login():
     st.title(APP_NAME)
     st.subheader("账号密码登录")
-    st.caption("首次使用默认管理员：admin / admin123")
+    st.caption("首次使用默认主管理员：admin / admin123")
     with st.form("login_form", clear_on_submit=False):
         username = st.text_input("账号")
         password = st.text_input("密码", type="password")
@@ -310,6 +436,9 @@ def render_login():
             st.session_state["logged_in"] = True
             st.session_state["login_user"] = str(username).strip()
             st.session_state["is_admin"] = bool(int(user.get("is_admin", 0))) if user else False
+            st.session_state["is_super_admin"] = bool(int(user.get("is_super_admin", 0))) if user else False
+            # 登录时加载可见板块
+            st.session_state["allowed_pages"] = get_user_allowed_pages(str(username).strip())
             st.rerun()
         else:
             st.error("账号或密码错误")
@@ -320,9 +449,13 @@ if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 if "is_admin" not in st.session_state:
     st.session_state["is_admin"] = False
+if "is_super_admin" not in st.session_state:
+    st.session_state["is_super_admin"] = False
+if "allowed_pages" not in st.session_state:
+    st.session_state["allowed_pages"] = DEFAULT_NORMAL_PAGES[:]
+
 if not st.session_state["logged_in"]:
     render_login()
-
 
 # -------------------- 常量 --------------------
 STATUS_MAP = {"在岗": "active", "请假": "leave", "冻结": "frozen"}
@@ -673,33 +806,35 @@ def render_data_cleanup():
 # -------------------- 侧边栏 --------------------
 st.sidebar.title(APP_NAME)
 st.sidebar.caption(f"当前用户：{st.session_state.get('login_user', '')}")
+
 if st.sidebar.button("退出登录", key="logout_btn"):
     st.session_state["logged_in"] = False
     st.session_state["is_admin"] = False
+    st.session_state["is_super_admin"] = False
     st.session_state.pop("login_user", None)
+    st.session_state["allowed_pages"] = DEFAULT_NORMAL_PAGES[:]
     st.rerun()
+
+# 基于账号权限过滤可见功能
+current_user = st.session_state.get("login_user", "")
+is_admin = bool(st.session_state.get("is_admin", False))
+allowed_pages = st.session_state.get("allowed_pages") or get_user_allowed_pages(current_user)
+allowed_pages = _normalize_pages(allowed_pages) if not is_admin else ALL_PAGES[:]
+st.session_state["allowed_pages"] = allowed_pages
 
 page = st.sidebar.radio(
     "功能导航",
-    [
-        "智能排班",
-        "批量排班",
-        "稽查员管理",
-        "任务管理",
-        "城市距离",
-        "城市坐标",
-        "模板导入",
-        "日历视图",
-        "账号管理",
-        "数据清理",
-    ],
+    allowed_pages,
     key="nav_radio",
 )
 
-st.sidebar.caption("纯 Streamlit 版本：已去除 iframe / 127.0.0.1 依赖，可直接分享给同事使用。")
 st.sidebar.caption(f"当前位置：{page}")
-
 st.title(f"{APP_NAME}｜{page}")
+
+# 强制保护：即使 session_state 被篡改，也不能访问未授权页面
+if (not is_admin) and (page not in allowed_pages):
+    st.error("当前账号无权限访问该板块，请联系主管理员开通。")
+    st.stop()
 
 
 # -------------------- 页面：智能排班 --------------------
@@ -1258,9 +1393,9 @@ elif page == "模板导入":
                     base_city = str(r[base_i] or "").strip()
                     if not name or not base_city:
                         continue
-                    gender = str(r[find_idx(headers, ["性别(男/女)"]) ] if find_idx(headers, ["性别(男/女)"]) is not None else "女")
-                    group_level = str(r[find_idx(headers, ["等级(A/B/C)"]) ] if find_idx(headers, ["等级(A/B/C)"]) is not None else "B")
-                    can_lead_raw = str(r[find_idx(headers, ["可带队(是/否)"]) ] if find_idx(headers, ["可带队(是/否)"]) is not None else "是")
+                    gender = str(r[find_idx(headers, ["性别(男/女)"])] if find_idx(headers, ["性别(男/女)"]) is not None else "女")
+                    group_level = str(r[find_idx(headers, ["等级(A/B/C)"])] if find_idx(headers, ["等级(A/B/C)"]) is not None else "B")
+                    can_lead_raw = str(r[find_idx(headers, ["可带队(是/否)"])] if find_idx(headers, ["可带队(是/否)"]) is not None else "是")
                     last_date_idx = find_idx(headers, ["上次结束日期(YYYY-MM-DD)(必填)"])
                     last_date_raw = r[last_date_idx] if last_date_idx is not None else ""
                     if isinstance(last_date_raw, datetime):
@@ -1369,7 +1504,6 @@ elif page == "日历视图":
         all_schedules_rows = []
         seen_day_task = set()
         for s in all_schedules:
-            # 去重：同一任务+同一稽查员+同起止只保留一次
             uniq = (s.task_id, s.auditor_id, s.start_date, s.end_date)
             if uniq in seen_day_task:
                 continue
@@ -1509,6 +1643,7 @@ elif page == "账号管理":
     st.subheader("账号管理")
     current_user = st.session_state.get("login_user", "")
     is_admin = bool(st.session_state.get("is_admin", False))
+    is_super_admin = bool(st.session_state.get("is_super_admin", False))
 
     st.subheader("我的密码")
     with st.form("change_my_password", clear_on_submit=True):
@@ -1529,16 +1664,21 @@ elif page == "账号管理":
 
     st.divider()
     if not is_admin:
-        st.info("当前账号仅可修改自己的密码。新增登录人员、重置他人密码仅管理员可操作。")
+        st.info("当前账号仅可修改自己的密码。新增登录人员、重置他人密码、配置可见板块仅管理员可操作。")
     else:
         st.subheader("新增登录人员")
         with st.form("create_user_form", clear_on_submit=True):
             c1, c2, c3 = st.columns(3)
             new_username = c1.text_input("新账号")
             new_password = c2.text_input("初始密码（至少6位）", type="password")
-            new_is_admin = c3.selectbox("权限", ["普通用户", "管理员"])
+            role = c3.selectbox("权限", ["普通用户", "管理员", "主管理员"])
             if st.form_submit_button("新增账号", type="primary"):
-                ok, msg = create_auth_user(new_username, new_password, is_admin=(new_is_admin == "管理员"))
+                ok, msg = create_auth_user(
+                    new_username,
+                    new_password,
+                    is_admin=(role in ("管理员", "主管理员")),
+                    is_super_admin=(role == "主管理员"),
+                )
                 if ok:
                     st.success(msg)
                     st.rerun()
@@ -1550,10 +1690,15 @@ elif page == "账号管理":
         if users:
             rows = []
             for u in users:
+                role_cn = "普通用户"
+                if int(u.get("is_super_admin", 0)) == 1:
+                    role_cn = "主管理员"
+                elif int(u.get("is_admin", 0)) == 1:
+                    role_cn = "管理员"
                 rows.append(
                     {
                         "账号": u.get("username"),
-                        "权限": "管理员" if int(u.get("is_admin", 0)) == 1 else "普通用户",
+                        "权限": role_cn,
                         "创建时间": u.get("created_at") or "",
                     }
                 )
@@ -1591,6 +1736,45 @@ elif page == "账号管理":
                                 st.rerun()
                             else:
                                 st.error(msg)
+
+        # 主管理员：配置普通用户可见板块
+        st.divider()
+        if not is_super_admin:
+            st.info("提示：只有【主管理员】可以配置普通账号的可见板块。")
+        else:
+            st.subheader("普通账号可见板块配置（主管理员）")
+            st.caption("勾选后保存：普通账号侧边栏仅显示被勾选的功能。管理员/主管理员默认全功能，不受此限制。")
+
+            normal_users = []
+            for u in users:
+                if int(u.get("is_admin", 0)) == 1:
+                    continue
+                normal_users.append(u.get("username"))
+
+            if not normal_users:
+                st.info("暂无普通账号")
+            else:
+                target_user = st.selectbox("选择普通账号", normal_users, key="perm_target_user")
+
+                current_pages = get_user_allowed_pages(target_user)
+                # 用 multiselect 实现“勾选对应功能”
+                selected_pages = st.multiselect(
+                    "可见板块（勾选）",
+                    options=ALL_PAGES,
+                    default=current_pages,
+                    key="perm_pages_multiselect",
+                )
+                c1, c2 = st.columns([1, 3])
+                if c1.button("保存可见板块", type="primary", key="save_perm_btn"):
+                    ok, msg = set_user_allowed_pages(target_user, selected_pages)
+                    if ok:
+                        st.success(msg)
+                        # 如果正在配置的是当前登录用户（极少见，因主管理员通常是 admin），同步刷新
+                        if str(target_user).strip() == str(current_user).strip():
+                            st.session_state["allowed_pages"] = get_user_allowed_pages(current_user)
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
 
 # -------------------- 页面：数据清理 --------------------
