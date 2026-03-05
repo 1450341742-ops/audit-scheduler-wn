@@ -1,13 +1,56 @@
+from __future__ import annotations
+
+import os
+import re
+import sqlite3
+from pathlib import Path
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
-DB_URL = "sqlite:///./audit_scheduler.db"
+# =========================
+# ✅ 固定数据库路径（关键修复）
+# =========================
+# 1) 若设置环境变量 AUDIT_SCHEDULER_DB，则优先使用（可填绝对路径或相对路径）
+# 2) 否则默认放到用户目录：~/WNRH_AuditScheduler/audit_scheduler.db
+#
+# 这样无论你在任何目录启动、Streamlit 重载、打包 exe、同事运行，都不会“写A读B”。
 
-engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
+def _resolve_db_file() -> Path:
+    env = os.environ.get("AUDIT_SCHEDULER_DB", "").strip()
+    if env:
+        p = Path(env).expanduser()
+        if not p.is_absolute():
+            # 相对路径按“当前文件所在项目根目录”解析（而不是 os.getcwd()）
+            # app/db.py 在 app/ 下，所以 root 是 app 的上一级
+            root = Path(__file__).resolve().parent.parent
+            p = (root / p).resolve()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+
+    base_dir = Path.home() / "WNRH_AuditScheduler"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    return base_dir / "audit_scheduler.db"
+
+
+DB_FILE = _resolve_db_file()
+
+# sqlite:/// + 绝对路径（Windows 需要 replace("\\","/")）
+DB_URL = f"sqlite:///{str(DB_FILE).replace('\\', '/')}"
+
+
+engine = create_engine(
+    DB_URL,
+    connect_args={"check_same_thread": False},
+    pool_pre_ping=True,
+)
+
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
 
 class Base(DeclarativeBase):
     pass
+
 
 def get_db():
     db = SessionLocal()
@@ -18,28 +61,14 @@ def get_db():
 
 
 def ensure_schema():
-    """SQLite 轻量迁移：为已有数据库补齐缺失字段（避免升级后录入/查询 500）。
-    说明：本项目不使用 alembic，因此用 PRAGMA + ALTER TABLE 做最小迁移。
+    """SQLite 轻量迁移：为已有数据库补齐缺失字段（避免升级后录入/查询异常）。
+    ✅ 关键：这里必须使用 DB_FILE（稳定绝对路径），不能用 os.getcwd()。
     """
-    import sqlite3, os, re
-
-    url = DB_URL
-    if not url.startswith("sqlite"):
+    db_file = DB_FILE
+    if not db_file.exists():
         return
 
-    m = re.match(r"sqlite:(/{3,4})(.+)$", url)
-    if not m:
-        return
-    path_part = m.group(2)
-
-    db_file = path_part
-    if not os.path.isabs(db_file):
-        db_file = os.path.abspath(os.path.join(os.getcwd(), db_file))
-
-    if not os.path.exists(db_file):
-        return
-
-    conn = sqlite3.connect(db_file)
+    conn = sqlite3.connect(str(db_file))
     cur = conn.cursor()
 
     def table_exists(name: str) -> bool:
@@ -90,7 +119,6 @@ def ensure_schema():
             add_col("schedules", "score", "REAL DEFAULT 0")
             add_col("schedules", "status", "TEXT DEFAULT 'confirmed'")
 
-        # --- city_distances (历史版本可能没有唯一约束，不做破坏性迁移) ---
         conn.commit()
     finally:
         conn.close()
