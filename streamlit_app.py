@@ -1,9 +1,11 @@
-# streamlit_app.py （根目录）——完全可覆盖版（已修复：表格改日期保存后刷新又变回去 / 变成数字）
+# streamlit_app.py （根目录）——完全可覆盖版（Streamlit v1.55.0 适配：上传按钮“Browse files”强制中文 + 去掉侧边栏路径/当前位置）
 # ✅ 修复点：
 # 1) safe_parse_date 支持 date/datetime/Timestamp/带时间字符串/Excel序列号（45231）等
 # 2) 保存时不再 str() 日期字段，直接传入 safe_parse_date
 # 3) 保存时增加 “结束 < 开始” 拦截，避免倒挂
 # 4) 保留：登录权限（管理员/主管理员/普通用户可见板块配置）、form+data_editor稳定提交、DB诊断等
+# 5) ✅ 模板上传区域英文完全中文化（包含按钮 Browse files -> 浏览文件）
+# 6) ✅ 侧边栏不再展示数据库路径（/mount/src/...）与“当前位置：xxx”
 
 import csv
 import io
@@ -35,6 +37,57 @@ from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 
 APP_NAME = "万宁睿和稽查排班"
 st.set_page_config(page_title=APP_NAME, layout="wide")
+
+# -------------------- ✅ 全局样式：FileUploader 英文化为中文（Streamlit v1.55.0） --------------------
+# 说明：Streamlit 原生 file_uploader 的英文是写死在前端组件里，最稳方式是 CSS 覆盖。
+st.markdown(
+    """
+    <style>
+    /* ====== st.file_uploader Dropzone：彻底中文化 ====== */
+
+    /* 1) 隐藏默认英文提示：Drag and drop file here / Limit ... / XLSX 等 */
+    [data-testid="stFileUploaderDropzone"] p,
+    [data-testid="stFileUploaderDropzone"] span,
+    [data-testid="stFileUploaderDropzone"] small {
+        display: none !important;
+    }
+
+    /* 2) 在 Dropzone 内插入中文提示（每个 uploader 都生效） */
+    [data-testid="stFileUploaderDropzone"]::before {
+        content: "将文件拖拽到此处，或点击右侧“浏览文件”上传（支持 .xlsx，单个文件 ≤200MB）";
+        display: block;
+        color: #333;
+        padding: 10px 6px 8px 6px;
+        line-height: 1.5;
+        font-size: 14px;
+    }
+
+    /* 3) 把右侧按钮文字强制替换为“浏览文件”
+          - v1.55.0 常见结构：button 内部有 span/文本
+          - 方案：隐藏内部文本，用 ::after 盖一层中文 */
+    [data-testid="stFileUploaderDropzone"] button {
+        position: relative !important;
+    }
+    [data-testid="stFileUploaderDropzone"] button * {
+        visibility: hidden !important;   /* 隐藏内部英文 */
+    }
+    [data-testid="stFileUploaderDropzone"] button::after {
+        content: "浏览文件";
+        visibility: visible !important;
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 600;
+        font-size: 14px;
+        color: inherit;
+        pointer-events: none; /* 不影响点击 */
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # -------------------- 初始化 --------------------
 Base.metadata.create_all(bind=engine)
@@ -913,12 +966,11 @@ def render_data_cleanup():
 # -------------------- 侧边栏 --------------------
 st.sidebar.title(APP_NAME)
 
-# DB 诊断：显示当前数据库路径
+# DB 诊断：不展示路径，只展示状态（避免 /mount/src/...）
 from app import db as dbmod
-
 p = Path(str(getattr(dbmod, "DB_FILE", "")))
-st.sidebar.write("✅ 当前数据库文件：")
-st.sidebar.code(str(p))
+
+st.sidebar.write("✅ 数据库状态：")
 if p and p.exists():
     st.sidebar.write(f"存在：True | 大小：{p.stat().st_size} bytes | 修改时间：{datetime.fromtimestamp(p.stat().st_mtime)}")
 else:
@@ -942,7 +994,8 @@ allowed_pages = _normalize_pages(allowed_pages) if not is_admin else ALL_PAGES[:
 st.session_state["allowed_pages"] = allowed_pages
 
 page = st.sidebar.radio("功能导航", allowed_pages, key="nav_radio")
-st.sidebar.caption(f"当前位置：{page}")
+# ✅ 删除“当前位置：xxx”
+# st.sidebar.caption(f"当前位置：{page}")
 
 # ✅ 右侧标题随左侧页面变更
 st.title(f"{APP_NAME}｜{page}")
