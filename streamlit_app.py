@@ -1,15 +1,3 @@
-# streamlit_app.py（根目录）——最终完整可覆盖版
-# ✅ 修复点：
-# 1) safe_parse_date 支持 date/datetime/Timestamp/带时间字符串/Excel序列号（45231）等
-# 2) 保存时不再 str() 日期字段，直接传入 safe_parse_date
-# 3) 保存时增加 “结束 < 开始” 拦截，避免倒挂
-# 4) 保留：登录权限（管理员/主管理员/普通用户可见板块配置）、form+data_editor稳定提交
-# 5) ✅ 模板导入：上传区域英文全部中文化，并且“Browse files”按钮显示为“浏览文件”
-# 6) ✅ 侧边栏：删除“数据库状态/数据状态/当前位置/功能导航”等字样（仅保留导航选项本身）
-# 7) ✅ 修复：任务/稽查员表格修改后真正写入数据库
-# 8) ✅ 修复：任务修改后，同步更新已有排班 Schedule 的时间/城市
-# 9) ✅ 修复：任务或稽查员修改后，清理智能排班/批量排班缓存，避免继续显示旧结果
-
 import csv
 import io
 import json
@@ -41,14 +29,10 @@ from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 APP_NAME = "万宁睿和稽查排班"
 st.set_page_config(page_title=APP_NAME, layout="wide")
 
-# -------------------- ✅ 全局样式：FileUploader 英文改中文（并保证按钮存在） --------------------
+# -------------------- 全局样式：FileUploader 英文改中文（并保证按钮存在） --------------------
 st.markdown(
     """
     <style>
-    /* =========================
-       Streamlit 1.55.0 FileUploader 最终解法
-       ========================= */
-
     [data-testid="stFileUploaderDropzoneInstructions"]{
         display:none !important;
     }
@@ -56,9 +40,8 @@ st.markdown(
     [data-testid="stFileUploaderDropzone"]{
         position: relative !important;
     }
-
     [data-testid="stFileUploaderDropzone"]::before{
-        content:"将文件拖拽到此处，或点击右侧“浏览文件”上传（支持 .xlsx / .csv，单个文件 ≤200MB）";
+        content:"将文件拖拽到此处，或点击右侧“浏览文件”上传（支持 .xlsx/.csv，单个文件 ≤200MB）";
         display:block;
         color:#333;
         padding:10px 6px 8px 6px;
@@ -68,31 +51,31 @@ st.markdown(
     }
 
     [data-testid="stFileUploaderDropzone"] input[type="file"]{
-        width:100% !important;
+        width: 100% !important;
     }
 
     [data-testid="stFileUploaderDropzone"] input[type="file"]::file-selector-button{
-        min-width:132px !important;
-        height:42px !important;
-        padding:0 18px !important;
-        border-radius:10px !important;
-        color:transparent !important;
-        -webkit-text-fill-color:transparent !important;
-        text-shadow:none !important;
+        min-width: 132px !important;
+        height: 42px !important;
+        padding: 0 18px !important;
+        border-radius: 10px !important;
+        color: transparent !important;
+        -webkit-text-fill-color: transparent !important;
+        text-shadow: none !important;
     }
 
     [data-testid="stFileUploaderDropzone"]::after{
         content:"浏览文件";
         position:absolute;
-        right:14px;
-        top:50%;
-        transform:translateY(-50%);
-        min-width:132px;
-        height:42px;
-        padding:0 18px;
-        border-radius:10px;
-        border:1px solid rgba(0,0,0,0.15);
-        background:rgba(255,255,255,0.95);
+        right: 14px;
+        top: 50%;
+        transform: translateY(-50%);
+        min-width: 132px;
+        height: 42px;
+        padding: 0 18px;
+        border-radius: 10px;
+        border: 1px solid rgba(0,0,0,0.15);
+        background: rgba(255,255,255,0.96);
         display:flex;
         align-items:center;
         justify-content:center;
@@ -101,8 +84,8 @@ st.markdown(
         color:#111;
         white-space:nowrap;
         pointer-events:none;
-        z-index:9999;
-        box-sizing:border-box;
+        z-index: 9999;
+        box-sizing: border-box;
     }
 
     @media (max-width: 520px){
@@ -115,7 +98,7 @@ st.markdown(
             min-width:124px;
             height:40px;
             padding:0 14px;
-            right:12px;
+            right: 12px;
             font-size:14px;
         }
         [data-testid="stFileUploaderDropzone"]::before{
@@ -149,8 +132,8 @@ def safe_parse_date(value) -> Optional[date]:
     """
     更鲁棒的日期解析：
     - 支持 date / datetime / pandas Timestamp
-    - 支持 YYYY-MM-DD、YYYY/MM/DD、YYYY-MM-DD HH:MM:SS
-    - 支持 Excel 序列号
+    - 支持 'YYYY-MM-DD'、'YYYY-MM-DD HH:MM:SS'
+    - 支持 Excel 序列号（int/float/纯数字字符串，比如 45231 或 45231.0）
     """
     if value is None:
         return None
@@ -176,7 +159,6 @@ def safe_parse_date(value) -> Optional[date]:
         if isinstance(value, (int, float)) and not (isinstance(value, float) and pd.isna(value)):
             base = datetime(1899, 12, 30)
             return (base + timedelta(days=float(value))).date()
-
         s_num = str(value).strip()
         if re.fullmatch(r"\d+(\.\d+)?", s_num):
             base = datetime(1899, 12, 30)
@@ -190,12 +172,18 @@ def safe_parse_date(value) -> Optional[date]:
 
     if " " in s:
         s = s.split(" ")[0].strip()
-    s = s.replace("/", "-")
+    s = s.replace("/", "-").replace(".", "-")
 
-    try:
-        return datetime.strptime(s, "%Y-%m-%d").date()
-    except Exception:
-        return None
+    for fmt in ("%Y-%m-%d", "%Y-%m", "%Y%m%d"):
+        try:
+            d = datetime.strptime(s, fmt).date()
+            if fmt == "%Y-%m":
+                return d.replace(day=1)
+            return d
+        except Exception:
+            pass
+
+    return None
 
 
 def d2s(v: Optional[date]) -> str:
@@ -225,18 +213,36 @@ def safe_commit(db: Session, context: str = "") -> bool:
         return False
 
 
+def clear_runtime_caches_after_data_change():
+    """
+    数据变更后，清空可能仍引用旧数据的前端状态/推荐结果
+    """
+    for k in [
+        "recommend_result",
+        "auditor_editor",
+        "task_editor",
+        "batch_report",
+    ]:
+        if k in st.session_state:
+            st.session_state.pop(k, None)
+
+
 def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_return):
     """
-    稳定拿到 data_editor 提交后的最终 DataFrame
+    对 data_editor 的返回做最终物化。
+    优先使用 editor_return（它通常已经包含最新编辑结果）；
+    若某些版本返回异常，再回退到 session_state 差异补丁。
     """
+    if isinstance(editor_return, pd.DataFrame):
+        out = editor_return.copy()
+        out = out.astype(object)
+        return out
+
     state = st.session_state.get(editor_key)
-
     if not isinstance(state, dict):
-        if isinstance(editor_return, pd.DataFrame):
-            return editor_return
-        return original_df
+        return original_df.copy()
 
-    df = original_df.copy()
+    df = original_df.copy().astype(object)
 
     edited_rows = state.get("edited_rows") or {}
     for ridx, changes in edited_rows.items():
@@ -264,22 +270,7 @@ def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_ret
         except Exception:
             pass
 
-    return df
-
-
-def normalize_editor_df(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out = out.where(pd.notna(out), None)
-    return out
-
-
-def clear_schedule_related_cache():
-    for k in [
-        "recommend_result",
-        "batch_report",
-    ]:
-        if k in st.session_state:
-            st.session_state.pop(k, None)
+    return df.astype(object)
 
 
 def _safe_int(x, default=None):
@@ -294,6 +285,24 @@ def _safe_int(x, default=None):
         return int(float(s))
     except Exception:
         return default
+
+
+def _safe_bool_delete(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    s = str(v).strip().lower()
+    return s in ("true", "1", "yes", "y", "是")
+
+
+def normalize_text(v) -> str:
+    if v is None:
+        return ""
+    try:
+        if pd.isna(v):
+            return ""
+    except Exception:
+        pass
+    return str(v).strip()
 
 
 def seed_city_distances_if_needed(db: Session):
@@ -844,135 +853,138 @@ def load_day_marks():
 
 
 def save_auditor_editor(df: pd.DataFrame):
-    df = normalize_editor_df(df)
+    """
+    稳定保存稽查员编辑表格：
+    - 逐行更新
+    - 每行 flush
+    - 不再无故把空日期覆盖为今天
+    """
+    df = df.copy().astype(object)
 
     with db_session() as db:
-        for _, row in df.iterrows():
-            rid = _safe_int(row.get("ID"), None)
-            if rid is None:
-                continue
+        try:
+            for _, row in df.iterrows():
+                rid = _safe_int(row.get("ID"), None)
+                if rid is None:
+                    continue
 
-            obj = db.query(Auditor).filter(Auditor.id == rid).first()
-            if not obj:
-                continue
+                obj = db.query(Auditor).filter(Auditor.id == rid).first()
+                if not obj:
+                    continue
 
-            delete_flag = bool(row.get("删除", False))
-            if delete_flag:
-                db.query(Schedule).filter(Schedule.auditor_id == rid).delete()
-                db.delete(obj)
-                continue
+                if _safe_bool_delete(row.get("删除", False)):
+                    db.query(Schedule).filter(Schedule.auditor_id == rid).delete()
+                    db.delete(obj)
+                    db.flush()
+                    continue
 
-            obj.name = str(row.get("姓名", "") or "").strip()
-            obj.gender = str(row.get("性别", "") or "").strip() or "女"
-            obj.group_level = str(row.get("等级", "") or "").strip() or "B"
-            obj.can_lead_team = str(row.get("可带队", "") or "").strip() == "是"
-            obj.base_city = str(row.get("常驻城市", "") or "").strip()
-            obj.max_weekly_tasks = _safe_int(row.get("周上限"), 0) or 0
-            obj.status = STATUS_MAP.get(str(row.get("状态", "") or "").strip(), "active")
-            obj.monthly_cases = _safe_int(row.get("本月院次"), 0) or 0
-            obj.travel_days = _safe_int(row.get("差旅天数"), 0) or 0
-            obj.continuous_days = _safe_int(row.get("连续天数"), 0) or 0
-            obj.last_task_end_city = str(row.get("上次结束城市", "") or "").strip() or None
+                name = normalize_text(row.get("姓名"))
+                base_city = normalize_text(row.get("常驻城市"))
+                if not name:
+                    raise ValueError(f"稽查员#{rid}：姓名不能为空")
+                if not base_city:
+                    raise ValueError(f"稽查员#{rid}：常驻城市不能为空")
 
-            parsed_last_date = safe_parse_date(row.get("上次结束日期", None))
-            obj.last_task_end_date = parsed_last_date if parsed_last_date else date.today()
+                last_date_raw = row.get("上次结束日期", None)
+                parsed_last_date = safe_parse_date(last_date_raw)
 
-        ok = safe_commit(db, "保存稽查员表格编辑")
-        if ok:
-            clear_schedule_related_cache()
-        return ok
+                obj.name = name
+                obj.gender = normalize_text(row.get("性别")) or "女"
+                obj.group_level = normalize_text(row.get("等级")) or "B"
+                obj.can_lead_team = (normalize_text(row.get("可带队")) == "是")
+                obj.base_city = base_city
+                obj.max_weekly_tasks = _safe_int(row.get("周上限"), 0) or 0
+                obj.status = STATUS_MAP.get(normalize_text(row.get("状态")), "active")
+                obj.monthly_cases = _safe_int(row.get("本月院次"), 0) or 0
+                obj.travel_days = _safe_int(row.get("差旅天数"), 0) or 0
+                obj.continuous_days = _safe_int(row.get("连续天数"), 0) or 0
+                obj.last_task_end_city = normalize_text(row.get("上次结束城市")) or None
+
+                if parsed_last_date is not None:
+                    obj.last_task_end_date = parsed_last_date
+
+                db.flush()
+
+            ok = safe_commit(db, "保存稽查员表格编辑")
+            return ok
+        except Exception as e:
+            db.rollback()
+            st.error("保存稽查员表格失败")
+            st.exception(e)
+            return False
 
 
 def save_task_editor(df: pd.DataFrame):
-    df = normalize_editor_df(df)
+    """
+    稳定保存任务编辑表格：
+    - 逐行更新
+    - 日期直接 safe_parse_date
+    - 开始/结束强校验
+    - 若任务已存在排班记录，同步更新对应 Schedule 的开始/结束
+    """
+    df = df.copy().astype(object)
 
     with db_session() as db:
-        for _, row in df.iterrows():
-            rid = _safe_int(row.get("ID"), None)
-            if rid is None:
-                continue
+        try:
+            for _, row in df.iterrows():
+                rid = _safe_int(row.get("ID"), None)
+                if rid is None:
+                    continue
 
-            obj = db.query(Task).filter(Task.id == rid).first()
-            if not obj:
-                continue
+                obj = db.query(Task).filter(Task.id == rid).first()
+                if not obj:
+                    continue
 
-            delete_flag = bool(row.get("删除", False))
-            if delete_flag:
-                db.query(Schedule).filter(Schedule.task_id == rid).delete()
-                db.delete(obj)
-                continue
+                if _safe_bool_delete(row.get("删除", False)):
+                    db.query(Schedule).filter(Schedule.task_id == rid).delete()
+                    db.delete(obj)
+                    db.flush()
+                    continue
 
-            old_start = obj.start_date
-            old_end = obj.end_date
-            old_city = obj.site_city
+                project_name = normalize_text(row.get("项目"))
+                site_city = normalize_text(row.get("城市"))
+                if not project_name:
+                    raise ValueError(f"任务#{rid}：项目名称不能为空")
+                if not site_city:
+                    raise ValueError(f"任务#{rid}：中心城市不能为空")
 
-            new_project_name = str(row.get("项目", "") or "").strip()
-            new_customer_name = str(row.get("客户", "") or "").strip() or None
-            new_need_expert = str(row.get("需要A", "") or "").strip() == "是"
-            new_required_headcount = _safe_int(row.get("人数"), 1) or 1
-            new_required_days = _safe_int(row.get("天数"), 1) or 1
-            new_required_gender = str(row.get("性别", "") or "").strip() or "不限"
-            new_specified_auditors = str(row.get("硬指定", "") or "").strip() or None
-            new_preferred_experts = str(row.get("软指定", "") or "").strip() or None
-            new_site_city = str(row.get("城市", "") or "").strip()
+                sd = safe_parse_date(row.get("开始", None))
+                ed = safe_parse_date(row.get("结束", None))
 
-            new_start = safe_parse_date(row.get("开始", None))
-            new_end = safe_parse_date(row.get("结束", None))
+                if sd is None:
+                    raise ValueError(f"任务#{rid}：开始日期格式不正确，请使用 YYYY-MM-DD 或有效日期值")
+                if ed is None:
+                    raise ValueError(f"任务#{rid}：结束日期格式不正确，请使用 YYYY-MM-DD 或有效日期值")
+                if ed < sd:
+                    raise ValueError(f"任务#{rid}：结束日期不能早于开始日期（{sd} ~ {ed}）")
 
-            if new_start is None:
-                new_start = obj.start_date
-            if new_end is None:
-                new_end = obj.end_date
+                obj.project_name = project_name
+                obj.customer_name = normalize_text(row.get("客户")) or None
+                obj.need_expert = (normalize_text(row.get("需要A")) == "是")
+                obj.required_headcount = _safe_int(row.get("人数"), 1) or 1
+                obj.required_days = _safe_int(row.get("天数"), max(1, (ed - sd).days + 1)) or max(1, (ed - sd).days + 1)
+                obj.required_gender = normalize_text(row.get("性别")) or "不限"
+                obj.specified_auditors = normalize_text(row.get("硬指定")) or None
+                obj.preferred_experts = normalize_text(row.get("软指定")) or None
+                obj.site_city = site_city
+                obj.start_date = sd
+                obj.end_date = ed
 
-            if new_start and new_end and new_end < new_start:
-                st.error(f"任务#{obj.id}：结束日期不能早于开始日期（{new_start} ~ {new_end}）")
-                db.rollback()
-                return False
-
-            obj.project_name = new_project_name
-            obj.customer_name = new_customer_name
-            obj.need_expert = new_need_expert
-            obj.required_headcount = new_required_headcount
-            obj.required_days = new_required_days
-            obj.required_gender = new_required_gender
-            obj.specified_auditors = new_specified_auditors
-            obj.preferred_experts = new_preferred_experts
-            obj.site_city = new_site_city
-            obj.start_date = new_start
-            obj.end_date = new_end
-
-            # 若任务关键字段变更，则同步更新已有排班快照
-            core_changed = (
-                old_start != new_start or
-                old_end != new_end or
-                old_city != new_site_city
-            )
-
-            if core_changed:
-                schedules = db.query(Schedule).filter(Schedule.task_id == obj.id).all()
+                schedules = db.query(Schedule).filter(Schedule.task_id == rid).all()
                 for s in schedules:
-                    auditor = db.query(Auditor).filter(Auditor.id == s.auditor_id).first()
-                    if auditor:
-                        try:
-                            from_city = compute_from_city(auditor, obj)
-                        except Exception:
-                            from_city = auditor.base_city or ""
-                    else:
-                        from_city = s.travel_from_city or ""
+                    s.start_date = sd
+                    s.end_date = ed
+                    s.travel_to_city = site_city
 
-                    s.start_date = new_start
-                    s.end_date = new_end
-                    s.travel_to_city = new_site_city
-                    s.travel_from_city = from_city
-                    try:
-                        s.distance_km = float(get_distance_km(db, from_city, new_site_city))
-                    except Exception:
-                        pass
+                db.flush()
 
-        ok = safe_commit(db, "保存任务表格编辑")
-        if ok:
-            clear_schedule_related_cache()
-        return ok
+            ok = safe_commit(db, "保存任务表格编辑")
+            return ok
+        except Exception as e:
+            db.rollback()
+            st.error("保存任务表格失败")
+            st.exception(e)
+            return False
 
 
 def render_data_cleanup():
@@ -992,7 +1004,7 @@ def render_data_cleanup():
             db.query(CityDistance).delete()
             db.query(City).delete()
             if safe_commit(db, "清空业务数据"):
-                clear_schedule_related_cache()
+                clear_runtime_caches_after_data_change()
                 st.success("已清空")
                 st.rerun()
 
@@ -1007,7 +1019,7 @@ if st.sidebar.button("退出登录", key="logout_btn"):
     st.session_state["is_super_admin"] = False
     st.session_state.pop("login_user", None)
     st.session_state["allowed_pages"] = DEFAULT_NORMAL_PAGES[:]
-    clear_schedule_related_cache()
+    clear_runtime_caches_after_data_change()
     st.rerun()
 
 current_user = st.session_state.get("login_user", "")
@@ -1132,8 +1144,8 @@ if page == "智能排班":
                             st.stop()
                         if not safe_commit(db, context=f"确认指派：task#{selected_task_id}"):
                             st.stop()
+                    clear_runtime_caches_after_data_change()
                     st.success("已确认指派")
-                    st.session_state.pop("recommend_result", None)
                     st.rerun()
 
             cands = rec.get("candidates") or []
@@ -1166,7 +1178,7 @@ if page == "智能排班":
                     db.delete(obj)
                     if not safe_commit(db, context=f"删除排班记录：schedule#{delete_sid}"):
                         st.stop()
-            clear_schedule_related_cache()
+            clear_runtime_caches_after_data_change()
             st.success("已删除")
             st.rerun()
 
@@ -1257,7 +1269,7 @@ elif page == "稽查员管理":
                     )
                     if not safe_commit(db, context=f"新增稽查员：{name.strip()}"):
                         st.stop()
-                clear_schedule_related_cache()
+                clear_runtime_caches_after_data_change()
                 st.success("已新增")
                 st.rerun()
 
@@ -1287,7 +1299,10 @@ elif page == "稽查员管理":
 
     if rows:
         st.caption("支持在表格内直接修改；勾选“删除”后点保存，即可删除对应人员。")
-        df = pd.DataFrame(rows)
+        df = pd.DataFrame(rows).astype(object)
+        for col in ["上次结束日期", "上次结束城市", "姓名", "性别", "等级", "可带队", "常驻城市", "状态"]:
+            if col in df.columns:
+                df[col] = df[col].astype(str)
 
         with st.form("auditor_editor_form", clear_on_submit=False):
             editor_return = st.data_editor(
@@ -1307,8 +1322,8 @@ elif page == "稽查员管理":
         if submitted:
             final_df = materialize_editor_df(df, "auditor_editor", editor_return)
             if save_auditor_editor(pd.DataFrame(final_df)):
+                clear_runtime_caches_after_data_change()
                 st.success("稽查员数据已更新")
-                st.session_state.pop("auditor_editor", None)
                 st.rerun()
     else:
         st.info("暂无数据")
@@ -1360,7 +1375,7 @@ elif page == "任务管理":
                     )
                     if not safe_commit(db, context=f"新增任务：{project_name.strip()}"):
                         st.stop()
-                clear_schedule_related_cache()
+                clear_runtime_caches_after_data_change()
                 st.success("已新增")
                 st.rerun()
 
@@ -1389,7 +1404,10 @@ elif page == "任务管理":
 
     if rows:
         st.caption("支持在表格内直接修改；勾选“删除”后点保存，即可删除对应任务。")
-        df = pd.DataFrame(rows)
+        df = pd.DataFrame(rows).astype(object)
+        for col in ["项目", "客户", "需要A", "性别", "硬指定", "软指定", "城市", "开始", "结束"]:
+            if col in df.columns:
+                df[col] = df[col].astype(str)
 
         with st.form("task_editor_form", clear_on_submit=False):
             editor_return = st.data_editor(
@@ -1411,8 +1429,8 @@ elif page == "任务管理":
             final_df = materialize_editor_df(df, "task_editor", editor_return)
             ok = save_task_editor(pd.DataFrame(final_df))
             if ok:
+                clear_runtime_caches_after_data_change()
                 st.success("任务数据已更新")
-                st.session_state.pop("task_editor", None)
                 st.rerun()
     else:
         st.info("暂无数据")
@@ -1441,7 +1459,7 @@ elif page == "城市距离":
                         db.add(CityDistance(from_city=a, to_city=b, km=float(km)))
                     if not safe_commit(db, context=f"城市距离新增/更新：{a}->{b}"):
                         st.stop()
-                clear_schedule_related_cache()
+                clear_runtime_caches_after_data_change()
                 st.success("已保存")
                 st.rerun()
 
@@ -1458,7 +1476,7 @@ elif page == "城市距离":
                     db.delete(obj)
                     if not safe_commit(db, context=f"删除城市距离：dist#{delete_id}"):
                         st.stop()
-            clear_schedule_related_cache()
+            clear_runtime_caches_after_data_change()
             st.success("已删除")
             st.rerun()
 
@@ -1486,7 +1504,7 @@ elif page == "城市坐标":
                         db.add(City(name=nm, lat=float(lat), lon=float(lon)))
                     if not safe_commit(db, context=f"城市坐标新增/更新：{nm}"):
                         st.stop()
-                clear_schedule_related_cache()
+                clear_runtime_caches_after_data_change()
                 st.success("已保存")
                 st.rerun()
 
@@ -1521,7 +1539,7 @@ elif page == "城市坐标":
                     imported += 1
                 if not safe_commit(db, context="城市坐标 CSV 导入"):
                     st.stop()
-            clear_schedule_related_cache()
+            clear_runtime_caches_after_data_change()
             st.success(f"已导入 / 更新 {imported} 条城市坐标。")
             st.rerun()
 
@@ -1538,7 +1556,7 @@ elif page == "城市坐标":
                     db.delete(obj)
                     if not safe_commit(db, context=f"删除城市：city#{delete_id}"):
                         st.stop()
-            clear_schedule_related_cache()
+            clear_runtime_caches_after_data_change()
             st.success("已删除")
             st.rerun()
 
@@ -1659,11 +1677,20 @@ elif page == "模板导入":
                     if not name or not base_city:
                         continue
 
-                    gender = str(r[find_idx(headers, ["性别(男/女)"])] if find_idx(headers, ["性别(男/女)"]) is not None else "女")
-                    group_level = str(r[find_idx(headers, ["等级(A/B/C)"])] if find_idx(headers, ["等级(A/B/C)"]) is not None else "B")
-                    can_lead_raw = str(r[find_idx(headers, ["可带队(是/否)"])] if find_idx(headers, ["可带队(是/否)"]) is not None else "是")
-
+                    gender_idx = find_idx(headers, ["性别(男/女)"])
+                    group_idx = find_idx(headers, ["等级(A/B/C)"])
+                    lead_idx = find_idx(headers, ["可带队(是/否)"])
+                    week_idx = find_idx(headers, ["每周上限(院次)"])
+                    status_idx = find_idx(headers, ["状态(在岗/请假/冻结)"])
+                    month_idx = find_idx(headers, ["本月已排院次"])
+                    travel_idx = find_idx(headers, ["本月差旅天数"])
+                    cont_idx = find_idx(headers, ["连续工作天数"])
+                    last_city_idx = find_idx(headers, ["上次结束城市(可空)"])
                     last_date_idx = find_idx(headers, ["上次结束日期(YYYY-MM-DD)(必填)"])
+
+                    gender = str(r[gender_idx] if gender_idx is not None else "女")
+                    group_level = str(r[group_idx] if group_idx is not None else "B")
+                    can_lead_raw = str(r[lead_idx] if lead_idx is not None else "是")
                     last_date_raw = r[last_date_idx] if last_date_idx is not None else None
                     last_date = safe_parse_date(last_date_raw) or date.today()
 
@@ -1673,6 +1700,12 @@ elif page == "模板导入":
                         rec.group_level = group_level or "B"
                         rec.can_lead_team = can_lead_raw in BOOL_TRUE
                         rec.base_city = base_city
+                        rec.max_weekly_tasks = _safe_int(r[week_idx], 1) if week_idx is not None else 1
+                        rec.status = STATUS_MAP.get(str(r[status_idx]).strip(), "active") if status_idx is not None else "active"
+                        rec.monthly_cases = _safe_int(r[month_idx], 0) if month_idx is not None else 0
+                        rec.travel_days = _safe_int(r[travel_idx], 0) if travel_idx is not None else 0
+                        rec.continuous_days = _safe_int(r[cont_idx], 0) if cont_idx is not None else 0
+                        rec.last_task_end_city = str(r[last_city_idx]).strip() if last_city_idx is not None and r[last_city_idx] is not None else None
                         rec.last_task_end_date = last_date
                     else:
                         db.add(
@@ -1682,18 +1715,19 @@ elif page == "模板导入":
                                 group_level=group_level or "B",
                                 can_lead_team=can_lead_raw in BOOL_TRUE,
                                 base_city=base_city,
-                                max_weekly_tasks=1,
-                                status="active",
-                                monthly_cases=0,
-                                travel_days=0,
-                                continuous_days=0,
+                                max_weekly_tasks=_safe_int(r[week_idx], 1) if week_idx is not None else 1,
+                                status=STATUS_MAP.get(str(r[status_idx]).strip(), "active") if status_idx is not None else "active",
+                                monthly_cases=_safe_int(r[month_idx], 0) if month_idx is not None else 0,
+                                travel_days=_safe_int(r[travel_idx], 0) if travel_idx is not None else 0,
+                                continuous_days=_safe_int(r[cont_idx], 0) if cont_idx is not None else 0,
+                                last_task_end_city=str(r[last_city_idx]).strip() if last_city_idx is not None and r[last_city_idx] is not None else None,
                                 last_task_end_date=last_date,
                             )
                         )
                     imported += 1
                 if not safe_commit(db, "导入稽查员模板"):
                     st.stop()
-            clear_schedule_related_cache()
+            clear_runtime_caches_after_data_change()
             st.success(f"已导入 / 更新 {imported} 条稽查员记录。")
             st.rerun()
 
@@ -1724,28 +1758,44 @@ elif page == "模板导入":
                     if end_d < start_d:
                         continue
 
+                    customer_i = find_idx(headers, ["客户/申办方"])
+                    need_i = find_idx(headers, ["需要A带队(是/否)"])
+                    head_i = find_idx(headers, ["所需人数"])
+                    days_i = find_idx(headers, ["任务天数"])
+                    gender_i = find_idx(headers, ["性别要求(男/女/不限)"])
+                    hard_i = find_idx(headers, ["硬指定人员(可空)"])
+                    soft_i = find_idx(headers, ["软指定专家/老师(可空)"])
+
                     rec = db.query(Task).filter(Task.project_name == project_name, Task.start_date == start_d, Task.site_city == site_city).first()
                     if rec:
+                        rec.customer_name = str(r[customer_i]).strip() if customer_i is not None and r[customer_i] is not None else None
+                        rec.need_expert = str(r[need_i]).strip() in BOOL_TRUE if need_i is not None else False
+                        rec.required_headcount = _safe_int(r[head_i], 1) if head_i is not None else 1
+                        rec.required_days = _safe_int(r[days_i], max(1, (end_d - start_d).days + 1)) if days_i is not None else max(1, (end_d - start_d).days + 1)
+                        rec.required_gender = str(r[gender_i]).strip() if gender_i is not None and r[gender_i] is not None else "不限"
+                        rec.specified_auditors = str(r[hard_i]).strip() if hard_i is not None and r[hard_i] is not None else None
+                        rec.preferred_experts = str(r[soft_i]).strip() if soft_i is not None and r[soft_i] is not None else None
                         rec.end_date = end_d
-                        rec.required_days = max(1, (end_d - start_d).days + 1)
                     else:
                         db.add(
                             Task(
                                 project_name=project_name,
+                                customer_name=str(r[customer_i]).strip() if customer_i is not None and r[customer_i] is not None else None,
+                                need_expert=str(r[need_i]).strip() in BOOL_TRUE if need_i is not None else False,
+                                required_headcount=_safe_int(r[head_i], 1) if head_i is not None else 1,
+                                required_days=_safe_int(r[days_i], max(1, (end_d - start_d).days + 1)) if days_i is not None else max(1, (end_d - start_d).days + 1),
+                                required_gender=str(r[gender_i]).strip() if gender_i is not None and r[gender_i] is not None else "不限",
+                                specified_auditors=str(r[hard_i]).strip() if hard_i is not None and r[hard_i] is not None else None,
+                                preferred_experts=str(r[soft_i]).strip() if soft_i is not None and r[soft_i] is not None else None,
                                 site_city=site_city,
                                 start_date=start_d,
                                 end_date=end_d,
-                                customer_name=None,
-                                need_expert=False,
-                                required_headcount=1,
-                                required_days=max(1, (end_d - start_d).days + 1),
-                                required_gender="不限",
                             )
                         )
                     imported += 1
                 if not safe_commit(db, "导入任务模板"):
                     st.stop()
-            clear_schedule_related_cache()
+            clear_runtime_caches_after_data_change()
             st.success(f"已导入 / 更新 {imported} 条任务记录。")
             st.rerun()
 
