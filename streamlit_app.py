@@ -29,6 +29,7 @@ from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 APP_NAME = "万宁睿和稽查排班"
 st.set_page_config(page_title=APP_NAME, layout="wide")
 
+# -------------------- 上传控件中文化 --------------------
 st.markdown(
     """
     <style>
@@ -109,6 +110,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# -------------------- 初始化 --------------------
 Base.metadata.create_all(bind=engine)
 ensure_schema()
 
@@ -216,10 +218,54 @@ def clear_runtime_caches_after_data_change():
 
 
 def get_editor_final_df(editor_key: str, fallback_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    兼容 data_editor 两类返回：
+    1) DataFrame
+    2) dict: edited_rows / deleted_rows / added_rows
+    """
     val = st.session_state.get(editor_key, None)
+
     if isinstance(val, pd.DataFrame):
         return val.copy().astype(object)
-    return fallback_df.copy().astype(object)
+
+    df = fallback_df.copy().astype(object)
+
+    if isinstance(val, dict):
+        edited_rows = val.get("edited_rows", {}) or {}
+        deleted_rows = val.get("deleted_rows", []) or []
+        added_rows = val.get("added_rows", []) or []
+
+        for ridx, changes in edited_rows.items():
+            try:
+                ridx = int(ridx)
+            except Exception:
+                continue
+            if ridx < 0 or ridx >= len(df):
+                continue
+            for col, new_val in (changes or {}).items():
+                if col in df.columns:
+                    df.at[ridx, col] = new_val
+
+        if deleted_rows:
+            try:
+                idxs = [int(i) for i in deleted_rows if 0 <= int(i) < len(df)]
+                if idxs:
+                    df = df.drop(index=idxs).reset_index(drop=True)
+            except Exception:
+                pass
+
+        if added_rows:
+            try:
+                add_df = pd.DataFrame(added_rows)
+                for col in df.columns:
+                    if col not in add_df.columns:
+                        add_df[col] = None
+                add_df = add_df[df.columns]
+                df = pd.concat([df, add_df], ignore_index=True)
+            except Exception:
+                pass
+
+    return df.astype(object)
 
 
 def _safe_int(x, default=None):
@@ -300,7 +346,7 @@ with db_session() as db:
     seed_city_distances_if_needed(db)
     seed_cities_if_needed(db)
 
-
+# -------------------- 权限 --------------------
 ALL_PAGES = [
     "智能排班",
     "批量排班",
@@ -514,6 +560,7 @@ def create_auth_user(username: str, password: str, is_admin: bool = False, is_su
         is_admin = True
 
     allowed = None if is_admin else json.dumps(DEFAULT_NORMAL_PAGES, ensure_ascii=False)
+
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -1004,7 +1051,7 @@ def render_data_cleanup():
                 st.success("已清空")
                 st.rerun()
 
-
+# -------------------- 侧边栏 --------------------
 st.sidebar.title(APP_NAME)
 st.sidebar.caption(f"当前用户：{st.session_state.get('login_user', '')}")
 
@@ -1036,7 +1083,7 @@ if (not is_admin) and (page not in allowed_pages):
     st.error("当前账号无权限访问该板块，请联系主管理员开通。")
     st.stop()
 
-
+# -------------------- 智能排班 --------------------
 if page == "智能排班":
     st.subheader("智能排班")
     st.caption("先按硬约束筛选，再按距离优先 + 适度负荷均衡评分推荐。")
@@ -1176,6 +1223,7 @@ if page == "智能排班":
             st.success("已删除")
             st.rerun()
 
+# -------------------- 批量排班 --------------------
 elif page == "批量排班":
     st.subheader("批量排班")
     st.caption("只会处理未排过的任务；按 need_expert 优先 > 人数多优先 > 开始日期早 排序。")
@@ -1215,6 +1263,7 @@ elif page == "批量排班":
             else:
                 st.info("无")
 
+# -------------------- 稽查员管理 --------------------
 elif page == "稽查员管理":
     st.subheader("稽查员管理")
     with st.form("auditor_form", clear_on_submit=True):
@@ -1322,6 +1371,7 @@ elif page == "稽查员管理":
     else:
         st.info("暂无数据")
 
+# -------------------- 任务管理 --------------------
 elif page == "任务管理":
     st.subheader("任务管理")
     with st.form("task_form", clear_on_submit=True):
@@ -1432,6 +1482,7 @@ elif page == "任务管理":
     else:
         st.info("暂无数据")
 
+# -------------------- 城市距离 --------------------
 elif page == "城市距离":
     st.subheader("城市距离")
     st.caption("系统会优先读取距离表；若未命中，会尝试按城市坐标自动计算并写回缓存。")
@@ -1475,6 +1526,7 @@ elif page == "城市距离":
             st.success("已删除")
             st.rerun()
 
+# -------------------- 城市坐标 --------------------
 elif page == "城市坐标":
     st.subheader("城市坐标")
     st.caption("用于自动计算全国城市直线距离；CSV 格式：name,lat,lon。")
@@ -1553,6 +1605,7 @@ elif page == "城市坐标":
             st.success("已删除")
             st.rerun()
 
+# -------------------- 模板导入 --------------------
 elif page == "模板导入":
     st.subheader("模板导入")
     st.caption("下载模板 → 填写 → 上传导入，支持新增/更新。")
@@ -1725,6 +1778,7 @@ elif page == "模板导入":
                     site_city = str(r[city_i] or "").strip()
                     start_d = safe_parse_date(r[sd_i])
                     end_d = safe_parse_date(r[ed_i])
+
                     if not project_name or not site_city or not start_d or not end_d:
                         continue
                     if end_d < start_d:
@@ -1771,6 +1825,7 @@ elif page == "模板导入":
             st.success(f"已导入 / 更新 {imported} 条任务记录。")
             st.rerun()
 
+# -------------------- 日历视图 --------------------
 elif page == "日历视图":
     st.subheader("日历视图")
     st.caption("按月查看排班、节假日标识，并支持导出 ICS 日历。")
@@ -1921,6 +1976,7 @@ elif page == "日历视图":
             one_ics = build_ics_events(db, auditor_id=auditor_id)
             st.download_button("导出当前稽查员 ICS 日历", one_ics, file_name=f"wnrh_auditor_{auditor_id}.ics", key="dl_one_ics")
 
+# -------------------- 账号管理 --------------------
 elif page == "账号管理":
     st.subheader("账号管理")
     current_user = st.session_state.get("login_user", "")
@@ -2048,6 +2104,7 @@ elif page == "账号管理":
                     else:
                         st.error(msg)
 
+# -------------------- 数据清理 --------------------
 elif page == "数据清理":
     render_data_cleanup()
 
