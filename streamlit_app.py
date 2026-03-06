@@ -133,7 +133,7 @@ def safe_parse_date(value) -> Optional[date]:
     更鲁棒的日期解析：
     - 支持 date / datetime / pandas Timestamp
     - 支持 'YYYY-MM-DD'、'YYYY-MM-DD HH:MM:SS'
-    - 支持 Excel 序列号（int/float/纯数字字符串，比如 45231 或 45231.0）
+    - 支持 Excel 序列号（45231 / 45231.0）
     """
     if value is None:
         return None
@@ -159,6 +159,7 @@ def safe_parse_date(value) -> Optional[date]:
         if isinstance(value, (int, float)) and not (isinstance(value, float) and pd.isna(value)):
             base = datetime(1899, 12, 30)
             return (base + timedelta(days=float(value))).date()
+
         s_num = str(value).strip()
         if re.fullmatch(r"\d+(\.\d+)?", s_num):
             base = datetime(1899, 12, 30)
@@ -214,14 +215,13 @@ def safe_commit(db: Session, context: str = "") -> bool:
 
 
 def clear_runtime_caches_after_data_change():
-    """
-    数据变更后，清空可能仍引用旧数据的前端状态/推荐结果
-    """
     for k in [
         "recommend_result",
         "auditor_editor",
         "task_editor",
         "batch_report",
+        "smart_task_select",
+        "member_ids_text",
     ]:
         if k in st.session_state:
             st.session_state.pop(k, None)
@@ -229,18 +229,16 @@ def clear_runtime_caches_after_data_change():
 
 def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_return):
     """
-    对 data_editor 的返回做最终物化。
-    优先使用 editor_return（它通常已经包含最新编辑结果）；
-    若某些版本返回异常，再回退到 session_state 差异补丁。
+    优先使用 data_editor 返回值；
+    若返回异常，再回退 session_state 补丁。
     """
     if isinstance(editor_return, pd.DataFrame):
-        out = editor_return.copy()
-        out = out.astype(object)
-        return out
+        df = editor_return.copy()
+        return df.astype(object)
 
     state = st.session_state.get(editor_key)
     if not isinstance(state, dict):
-        return original_df.copy()
+        return original_df.copy().astype(object)
 
     df = original_df.copy().astype(object)
 
@@ -853,13 +851,10 @@ def load_day_marks():
 
 
 def save_auditor_editor(df: pd.DataFrame):
-    """
-    稳定保存稽查员编辑表格：
-    - 逐行更新
-    - 每行 flush
-    - 不再无故把空日期覆盖为今天
-    """
     df = df.copy().astype(object)
+    errors = []
+    saved_count = 0
+    deleted_count = 0
 
     with db_session() as db:
         try:
@@ -876,37 +871,54 @@ def save_auditor_editor(df: pd.DataFrame):
                     db.query(Schedule).filter(Schedule.auditor_id == rid).delete()
                     db.delete(obj)
                     db.flush()
+                    deleted_count += 1
                     continue
 
-                name = normalize_text(row.get("姓名"))
-                base_city = normalize_text(row.get("常驻城市"))
-                if not name:
-                    raise ValueError(f"稽查员#{rid}：姓名不能为空")
-                if not base_city:
-                    raise ValueError(f"稽查员#{rid}：常驻城市不能为空")
+                try:
+                    name = normalize_text(row.get("姓名"))
+                    base_city = normalize_text(row.get("常驻城市"))
 
-                last_date_raw = row.get("上次结束日期", None)
-                parsed_last_date = safe_parse_date(last_date_raw)
+                    if not name:
+                        errors.append(f"稽查员#{rid}：姓名为空，已跳过")
+                        continue
+                    if not base_city:
+                        errors.append(f"稽查员#{rid}：常驻城市为空，已跳过")
+                        continue
 
-                obj.name = name
-                obj.gender = normalize_text(row.get("性别")) or "女"
-                obj.group_level = normalize_text(row.get("等级")) or "B"
-                obj.can_lead_team = (normalize_text(row.get("可带队")) == "是")
-                obj.base_city = base_city
-                obj.max_weekly_tasks = _safe_int(row.get("周上限"), 0) or 0
-                obj.status = STATUS_MAP.get(normalize_text(row.get("状态")), "active")
-                obj.monthly_cases = _safe_int(row.get("本月院次"), 0) or 0
-                obj.travel_days = _safe_int(row.get("差旅天数"), 0) or 0
-                obj.continuous_days = _safe_int(row.get("连续天数"), 0) or 0
-                obj.last_task_end_city = normalize_text(row.get("上次结束城市")) or None
+                    parsed_last_date = safe_parse_date(row.get("上次结束日期", None))
 
-                if parsed_last_date is not None:
-                    obj.last_task_end_date = parsed_last_date
+                    obj.name = name
+                    obj.gender = normalize_text(row.get("性别")) or "女"
+                    obj.group_level = normalize_text(row.get("等级")) or "B"
+                    obj.can_lead_team = (normalize_text(row.get("可带队")) == "是")
+                    obj.base_city = base_city
+                    obj.max_weekly_tasks = _safe_int(row.get("周上限"), obj.max_weekly_tasks or 0) or 0
+                    obj.status = STATUS_MAP.get(normalize_text(row.get("状态")), obj.status or "active")
+                    obj.monthly_cases = _safe_int(row.get("本月院次"), obj.monthly_cases or 0) or 0
+                    obj.travel_days = _safe_int(row.get("差旅天数"), obj.travel_days or 0) or 0
+                    obj.continuous_days = _safe_int(row.get("连续天数"), obj.continuous_days or 0) or 0
+                    obj.last_task_end_city = normalize_text(row.get("上次结束城市")) or None
 
-                db.flush()
+                    if parsed_last_date is not None:
+                        obj.last_task_end_date = parsed_last_date
+
+                    db.flush()
+                    saved_count += 1
+
+                except Exception as e:
+                    errors.append(f"稽查员#{rid} 保存失败：{e}")
 
             ok = safe_commit(db, "保存稽查员表格编辑")
-            return ok
+            if not ok:
+                return False
+
+            if saved_count or deleted_count:
+                st.success(f"稽查员表格已保存：更新 {saved_count} 条，删除 {deleted_count} 条")
+            if errors:
+                for msg in errors[:20]:
+                    st.warning(msg)
+            return True
+
         except Exception as e:
             db.rollback()
             st.error("保存稽查员表格失败")
@@ -916,13 +928,16 @@ def save_auditor_editor(df: pd.DataFrame):
 
 def save_task_editor(df: pd.DataFrame):
     """
-    稳定保存任务编辑表格：
-    - 逐行更新
-    - 日期直接 safe_parse_date
-    - 开始/结束强校验
-    - 若任务已存在排班记录，同步更新对应 Schedule 的开始/结束
+    任务表格稳定保存版：
+    - 某一行异常时不影响整表
+    - 开始/结束日期异常时尽量自动修正
+    - 若结束 < 开始，优先按“天数”或原 required_days 自动重算
+    - 若仍无法修正，只跳过该行
     """
     df = df.copy().astype(object)
+    errors = []
+    saved_count = 0
+    deleted_count = 0
 
     with db_session() as db:
         try:
@@ -939,47 +954,97 @@ def save_task_editor(df: pd.DataFrame):
                     db.query(Schedule).filter(Schedule.task_id == rid).delete()
                     db.delete(obj)
                     db.flush()
+                    deleted_count += 1
                     continue
 
-                project_name = normalize_text(row.get("项目"))
-                site_city = normalize_text(row.get("城市"))
-                if not project_name:
-                    raise ValueError(f"任务#{rid}：项目名称不能为空")
-                if not site_city:
-                    raise ValueError(f"任务#{rid}：中心城市不能为空")
+                try:
+                    project_name = normalize_text(row.get("项目"))
+                    site_city = normalize_text(row.get("城市"))
 
-                sd = safe_parse_date(row.get("开始", None))
-                ed = safe_parse_date(row.get("结束", None))
+                    if not project_name:
+                        errors.append(f"任务#{rid}：项目名称为空，已跳过")
+                        continue
+                    if not site_city:
+                        errors.append(f"任务#{rid}：中心城市为空，已跳过")
+                        continue
 
-                if sd is None:
-                    raise ValueError(f"任务#{rid}：开始日期格式不正确，请使用 YYYY-MM-DD 或有效日期值")
-                if ed is None:
-                    raise ValueError(f"任务#{rid}：结束日期格式不正确，请使用 YYYY-MM-DD 或有效日期值")
-                if ed < sd:
-                    raise ValueError(f"任务#{rid}：结束日期不能早于开始日期（{sd} ~ {ed}）")
+                    raw_start = row.get("开始", None)
+                    raw_end = row.get("结束", None)
+                    raw_days = row.get("天数", None)
 
-                obj.project_name = project_name
-                obj.customer_name = normalize_text(row.get("客户")) or None
-                obj.need_expert = (normalize_text(row.get("需要A")) == "是")
-                obj.required_headcount = _safe_int(row.get("人数"), 1) or 1
-                obj.required_days = _safe_int(row.get("天数"), max(1, (ed - sd).days + 1)) or max(1, (ed - sd).days + 1)
-                obj.required_gender = normalize_text(row.get("性别")) or "不限"
-                obj.specified_auditors = normalize_text(row.get("硬指定")) or None
-                obj.preferred_experts = normalize_text(row.get("软指定")) or None
-                obj.site_city = site_city
-                obj.start_date = sd
-                obj.end_date = ed
+                    sd = safe_parse_date(raw_start)
+                    ed = safe_parse_date(raw_end)
+                    days = _safe_int(raw_days, None)
 
-                schedules = db.query(Schedule).filter(Schedule.task_id == rid).all()
-                for s in schedules:
-                    s.start_date = sd
-                    s.end_date = ed
-                    s.travel_to_city = site_city
+                    # 开始日期无效：保留数据库原值
+                    if sd is None:
+                        sd = obj.start_date
 
-                db.flush()
+                    # 结束日期无效：优先按天数算，否则保留数据库原值
+                    if ed is None:
+                        if days is not None and days >= 1 and sd is not None:
+                            ed = sd + timedelta(days=days - 1)
+                        else:
+                            ed = obj.end_date
+
+                    # 若日期反了，优先按天数重算
+                    if sd and ed and ed < sd:
+                        if days is not None and days >= 1:
+                            ed = sd + timedelta(days=days - 1)
+                        elif obj.required_days and int(obj.required_days) >= 1:
+                            ed = sd + timedelta(days=int(obj.required_days) - 1)
+                        else:
+                            errors.append(f"任务#{rid}：结束日期早于开始日期，且无法自动修正，已跳过（{sd} ~ {ed}）")
+                            continue
+
+                    # 最终兜底
+                    if sd is None:
+                        errors.append(f"任务#{rid}：开始日期无效，已跳过")
+                        continue
+                    if ed is None:
+                        errors.append(f"任务#{rid}：结束日期无效，已跳过")
+                        continue
+                    if ed < sd:
+                        errors.append(f"任务#{rid}：结束日期仍早于开始日期，已跳过（{sd} ~ {ed}）")
+                        continue
+
+                    final_days = days if (days is not None and days >= 1) else max(1, (ed - sd).days + 1)
+
+                    obj.project_name = project_name
+                    obj.customer_name = normalize_text(row.get("客户")) or None
+                    obj.need_expert = (normalize_text(row.get("需要A")) == "是")
+                    obj.required_headcount = _safe_int(row.get("人数"), obj.required_headcount or 1) or 1
+                    obj.required_days = final_days
+                    obj.required_gender = normalize_text(row.get("性别")) or "不限"
+                    obj.specified_auditors = normalize_text(row.get("硬指定")) or None
+                    obj.preferred_experts = normalize_text(row.get("软指定")) or None
+                    obj.site_city = site_city
+                    obj.start_date = sd
+                    obj.end_date = ed
+
+                    schedules = db.query(Schedule).filter(Schedule.task_id == rid).all()
+                    for s in schedules:
+                        s.start_date = sd
+                        s.end_date = ed
+                        s.travel_to_city = site_city
+
+                    db.flush()
+                    saved_count += 1
+
+                except Exception as e:
+                    errors.append(f"任务#{rid} 保存失败：{e}")
 
             ok = safe_commit(db, "保存任务表格编辑")
-            return ok
+            if not ok:
+                return False
+
+            if saved_count or deleted_count:
+                st.success(f"任务表格已保存：更新 {saved_count} 条，删除 {deleted_count} 条")
+            if errors:
+                for msg in errors[:20]:
+                    st.warning(msg)
+            return True
+
         except Exception as e:
             db.rollback()
             st.error("保存任务表格失败")
@@ -1321,9 +1386,9 @@ elif page == "稽查员管理":
 
         if submitted:
             final_df = materialize_editor_df(df, "auditor_editor", editor_return)
-            if save_auditor_editor(pd.DataFrame(final_df)):
+            ok = save_auditor_editor(pd.DataFrame(final_df))
+            if ok:
                 clear_runtime_caches_after_data_change()
-                st.success("稽查员数据已更新")
                 st.rerun()
     else:
         st.info("暂无数据")
@@ -1430,7 +1495,6 @@ elif page == "任务管理":
             ok = save_task_editor(pd.DataFrame(final_df))
             if ok:
                 clear_runtime_caches_after_data_change()
-                st.success("任务数据已更新")
                 st.rerun()
     else:
         st.info("暂无数据")
