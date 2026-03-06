@@ -40,14 +40,15 @@ st.set_page_config(page_title=APP_NAME, layout="wide")
 # - 改为：仅把原英文文本 opacity=0（保留布局宽度），再用 ::after 叠加“浏览文件”
 # - 强制给按钮 min-width/height/padding，使其在窄屏也合理
 st.markdown(
+  st.markdown(
     """
     <style>
-    /* 1) 仅隐藏 uploader 的英文说明区（不影响按钮） */
+    /* 1) 仅隐藏 uploader 默认英文说明区（不动按钮区） */
     [data-testid="stFileUploaderDropzoneInstructions"] {
         display: none !important;
     }
 
-    /* 2) 在 dropzone 内插入中文提示 */
+    /* 2) Dropzone 中文提示 */
     [data-testid="stFileUploaderDropzone"]::before {
         content: "将文件拖拽到此处，或点击右侧“浏览文件”上传（支持 .xlsx，单个文件 ≤200MB）";
         display: block;
@@ -58,9 +59,9 @@ st.markdown(
         white-space: normal;
     }
 
-    /* 3) 按钮：固定可读尺寸 + 不塌缩 */
+    /* 3) 定位到按钮（不同版本可能是 button 或 role=button） */
     [data-testid="stFileUploaderDropzone"] button,
-    [data-testid="stFileUploaderDropzone"] [role="button"]{
+    [data-testid="stFileUploaderDropzone"] [role="button"] {
         min-width: 120px !important;
         height: 40px !important;
         padding: 0 16px !important;
@@ -70,40 +71,38 @@ st.markdown(
         align-items: center !important;
         justify-content: center !important;
         white-space: nowrap !important;
+
+        /* ✅ 关键：隐藏按钮自身“所有文字”（包括直接文本节点 Browse files） */
+        color: transparent !important;
+        -webkit-text-fill-color: transparent !important;
+        text-shadow: none !important;
     }
 
-    /* 4) 隐藏原英文，但保留其占位（关键：opacity=0 不影响宽度计算） */
-    [data-testid="stFileUploaderDropzone"] button * ,
-    [data-testid="stFileUploaderDropzone"] [role="button"] * {
-        opacity: 0 !important;
-    }
-
-    /* 5) 叠加中文按钮文字 */
+    /* 4) 叠加中文按钮文字 */
     [data-testid="stFileUploaderDropzone"] button::after,
     [data-testid="stFileUploaderDropzone"] [role="button"]::after {
         content: "浏览文件";
-        opacity: 1 !important;
         position: absolute;
-        left: 0; right: 0; top: 0; bottom: 0;
+        inset: 0;
         display: flex;
         align-items: center;
         justify-content: center;
         font-size: 14px;
         font-weight: 600;
         pointer-events: none; /* 不影响点击 */
-        color: inherit;
+        color: #111;          /* 直接指定中文颜色，避免继承 transparent */
         white-space: nowrap;
     }
 
-    /* 6) 窄屏兜底：按钮也别挤成方块 */
+    /* 5) 窄屏兜底 */
     @media (max-width: 520px) {
         [data-testid="stFileUploaderDropzone"] button,
-        [data-testid="stFileUploaderDropzone"] [role="button"]{
+        [data-testid="stFileUploaderDropzone"] [role="button"] {
             min-width: 110px !important;
             height: 38px !important;
             padding: 0 12px !important;
         }
-        [data-testid="stFileUploaderDropzone"]::before{
+        [data-testid="stFileUploaderDropzone"]::before {
             font-size: 13px;
         }
     }
