@@ -603,6 +603,54 @@ STATUS_MAP_REV = {v: k for k, v in STATUS_MAP.items()}
 BOOL_TRUE = {"是", "Y", "y", "yes", "YES", "True", "true", "1", "是/yes"}
 
 
+def ics_escape(s: str) -> str:
+    return (s or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+def build_ics_events(db: Session, auditor_id: int | None = None):
+    q = db.query(Schedule).order_by(Schedule.id.desc())
+    if auditor_id:
+        q = q.filter(Schedule.auditor_id == auditor_id)
+    sch = q.all()
+    events = []
+    now = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    for s in sch:
+        a = db.query(Auditor).filter(Auditor.id == s.auditor_id).first()
+        t = db.query(Task).filter(Task.id == s.task_id).first()
+        if not a or not t:
+            continue
+        start = datetime.combine(t.start_date, datetime.min.time()).replace(hour=9)
+        actual_end = t.end_date or (t.start_date + timedelta(days=max(1, int(t.required_days or 1)) - 1))
+        if actual_end < t.start_date:
+            actual_end = t.start_date
+        end_exclusive = datetime.combine(actual_end + timedelta(days=1), datetime.min.time()).replace(hour=18)
+        uid = f"wnrh-{s.id}@scheduler"
+        summary = f"{t.project_name}｜{t.site_city}｜{s.role}"
+        desc = f"客户:{t.customer_name or ''}\n人数:{t.required_headcount} 天数:{t.required_days}\n负责人/成员:{a.name}"
+        events.extend(
+            [
+                "BEGIN:VEVENT",
+                f"UID:{uid}",
+                f"DTSTAMP:{now}",
+                f"DTSTART:{start.strftime('%Y%m%dT%H%M%S')}",
+                f"DTEND:{end_exclusive.strftime('%Y%m%dT%H%M%S')}",
+                f"SUMMARY:{ics_escape(summary)}",
+                f"DESCRIPTION:{ics_escape(desc)}",
+                "END:VEVENT",
+            ]
+        )
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//WNRH Scheduler//CN",
+        "CALSCALE:GREGORIAN",
+        "X-WR-CALNAME:万宁睿和排班",
+        *events,
+        "END:VCALENDAR",
+    ]
+    return "\r\n".join(lines).encode("utf-8")
+
+
 def update_auditor_record(
     auditor_id: int,
     name: str,
@@ -741,6 +789,170 @@ def delete_task_record(task_id: int):
         db.query(Schedule).filter(Schedule.task_id == int(task_id)).delete()
         db.delete(obj)
         return safe_commit(db, f"删除任务#{task_id}")
+
+
+def assign_team_to_task(db: Session, task: Task, leader_id: int, member_ids: list[int]):
+    if db.query(Schedule).filter(Schedule.task_id == task.id).count() > 0:
+        return False, "该任务已存在排班记录，不能重复排班"
+
+    start_date = task.start_date
+    end_date = task.end_date or (task.start_date + timedelta(days=max(1, int(task.required_days or 1)) - 1))
+    selected_ids = [int(leader_id)] + [int(x) for x in member_ids if int(x) != int(leader_id)]
+
+    for aid in selected_ids:
+        existing = db.query(Schedule).filter(Schedule.auditor_id == aid).all()
+        for s in existing:
+            if not (end_date < s.start_date or s.end_date < start_date):
+                return False, f"稽查员#{aid} 与已有任务时间冲突"
+
+        auditor = db.query(Auditor).filter(Auditor.id == aid).first()
+        if auditor and auditor.last_task_end_date and auditor.last_task_end_date >= start_date:
+            return False, f"稽查员 {auditor.name} 的上次结束日期与本次开始日期冲突"
+
+    def add_schedule(auditor_id: int, role: str):
+        auditor = db.query(Auditor).filter(Auditor.id == auditor_id).first()
+        if not auditor:
+            return
+
+        from_city = compute_from_city(auditor, task)
+        km = get_distance_km(db, from_city, task.site_city)
+
+        db.add(
+            Schedule(
+                task_id=task.id,
+                auditor_id=auditor.id,
+                role=role,
+                start_date=start_date,
+                end_date=end_date,
+                travel_from_city=from_city,
+                travel_to_city=task.site_city,
+                distance_km=float(km),
+                score=0.0,
+                status="confirmed",
+            )
+        )
+
+        auditor.monthly_cases = int(auditor.monthly_cases or 0) + 1
+        days = (end_date - start_date).days + 1
+        auditor.travel_days = int(auditor.travel_days or 0) + max(0, days)
+        auditor.continuous_days = max(int(auditor.continuous_days or 0), days)
+        auditor.last_task_end_city = task.site_city
+        auditor.last_task_end_date = end_date
+
+    add_schedule(int(leader_id), "leader")
+    for mid in member_ids:
+        if int(mid) != int(leader_id):
+            add_schedule(int(mid), "member")
+
+    return True, "ok"
+
+
+def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
+    if d2 < d1:
+        d1, d2 = d2, d1
+
+    scheduled_task_ids = {tid for (tid,) in db.query(Schedule.task_id).distinct().all()}
+    tasks = db.query(Task).filter(Task.start_date >= d1, Task.start_date <= d2).all()
+    tasks = [t for t in tasks if t.id not in scheduled_task_ids]
+    tasks.sort(key=lambda t: (0 if t.need_expert else 1, -int(t.required_headcount or 1), t.start_date))
+
+    auditors = db.query(Auditor).all()
+    report = {"assigned": [], "skipped": [], "batch_week_counts": {}}
+
+    for t in tasks:
+        schedules_all = db.query(Schedule).all()
+        candidates = build_candidates(db, t, auditors, schedules_all)
+        team = propose_team(t, candidates)
+
+        if mode == "optimized" and candidates:
+            avg_cases = float(sum(int(a.monthly_cases or 0) for a in auditors) / max(1, len(auditors)))
+            leader_pool = [c for c in candidates if c.can_lead_team]
+            if t.need_expert:
+                leader_pool = [c for c in leader_pool if c.group_level == "A"]
+            leader_pool = leader_pool[:5]
+            member_pool_all = candidates[:12]
+            auditor_lookup = {a.id: a for a in auditors}
+            best_team = None
+            best_obj = None
+
+            from app.scheduler import TeamProposal
+
+            for leader in leader_pool:
+                member_pool = [c for c in member_pool_all if c.auditor_id != leader.auditor_id]
+                need_n = max(0, int(t.required_headcount or 1) - 1)
+
+                if need_n == 0:
+                    cand_team = TeamProposal(
+                        leader=leader,
+                        members=[],
+                        team_score=leader.score,
+                        notes="optimized-single",
+                    )
+                    obj = team_objective(cand_team, auditor_lookup, avg_cases, report["batch_week_counts"])
+                    if best_obj is None or obj < best_obj:
+                        best_obj, best_team = obj, cand_team
+                    continue
+
+                base_members = member_pool[:need_n]
+                if len(base_members) < need_n:
+                    continue
+
+                cand_team = TeamProposal(
+                    leader=leader,
+                    members=base_members,
+                    team_score=leader.score + sum(m.score for m in base_members) / max(1, len(base_members)),
+                    notes="optimized",
+                )
+                obj = team_objective(cand_team, auditor_lookup, avg_cases, report["batch_week_counts"])
+                if best_obj is None or obj < best_obj:
+                    best_obj, best_team = obj, cand_team
+
+            if best_team:
+                team = best_team
+
+        if not team:
+            report["skipped"].append({"task_id": t.id, "project": t.project_name, "reason": "无可用团队"})
+            continue
+
+        leader_id = int(team.leader.auditor_id)
+        member_ids = [int(m.auditor_id) for m in team.members]
+
+        ok, msg = assign_team_to_task(db, t, leader_id, member_ids)
+        if not ok:
+            db.rollback()
+            report["skipped"].append({"task_id": t.id, "project": t.project_name, "reason": msg})
+            continue
+
+        for aid in [leader_id] + member_ids:
+            report["batch_week_counts"][aid] = int(report["batch_week_counts"].get(aid, 0)) + 1
+
+        if not safe_commit(db, context=f"批量排班 commit：task#{t.id} {t.project_name}"):
+            report["skipped"].append({"task_id": t.id, "project": t.project_name, "reason": "数据库写入失败"})
+            continue
+
+        report["assigned"].append(
+            {
+                "task_id": t.id,
+                "project": t.project_name,
+                "leader": team.leader.auditor_name,
+                "members": [m.auditor_name for m in team.members],
+            }
+        )
+
+    return report
+
+
+def load_day_marks():
+    try:
+        p = Path(__file__).resolve().parent / "app" / "holidays_cn.json"
+        if p.exists():
+            obj = json.loads(p.read_text(encoding="utf-8"))
+            items = obj.get("items", [])
+            if isinstance(items, list):
+                return items
+    except Exception:
+        pass
+    return []
 
 
 # -------------------- 侧边栏 --------------------
@@ -955,7 +1167,7 @@ elif page == "批量排班":
             else:
                 st.info("无")
 
-# -------------------- 稽查员管理（稳定版：表格展示 + 表单编辑） --------------------
+# -------------------- 稽查员管理 --------------------
 elif page == "稽查员管理":
     st.subheader("稽查员管理")
 
@@ -1098,7 +1310,7 @@ elif page == "稽查员管理":
                     st.success("稽查员已删除")
                     st.rerun()
 
-# -------------------- 任务管理（稳定版：表格展示 + 表单编辑） --------------------
+# -------------------- 任务管理 --------------------
 elif page == "任务管理":
     st.subheader("任务管理")
 
@@ -1863,7 +2075,25 @@ elif page == "账号管理":
 
 # -------------------- 数据清理 --------------------
 elif page == "数据清理":
-    render_data_cleanup()
+    st.subheader("数据清理")
+    st.warning("当前无数据时，可直接清空所有业务表。此操作不可恢复。")
+    with st.form("cleanup_form"):
+        confirm = st.text_input("输入 CLEAR 确认清空")
+        submitted = st.form_submit_button("清空全部业务数据", type="primary")
+    if submitted:
+        if confirm != "CLEAR":
+            st.error("请输入 CLEAR")
+        else:
+            with db_session() as db:
+                db.query(Schedule).delete()
+                db.query(Task).delete()
+                db.query(Auditor).delete()
+                db.query(CityDistance).delete()
+                db.query(City).delete()
+                if safe_commit(db, "清空业务数据"):
+                    clear_runtime_caches_after_data_change()
+                    st.success("已清空")
+                    st.rerun()
 
 else:
     st.info("请选择左侧功能导航。")
