@@ -1,11 +1,14 @@
-# streamlit_app.py（根目录）——完全可覆盖版（Streamlit v1.55.0：上传按钮“浏览文件”必须显示 + 删除侧边栏“导航/数据状态”字样）
+# streamlit_app.py（根目录）——最终完整可覆盖版
 # ✅ 修复点：
 # 1) safe_parse_date 支持 date/datetime/Timestamp/带时间字符串/Excel序列号（45231）等
 # 2) 保存时不再 str() 日期字段，直接传入 safe_parse_date
 # 3) 保存时增加 “结束 < 开始” 拦截，避免倒挂
-# 4) 保留：登录权限（管理员/主管理员/普通用户可见板块配置）、form+data_editor稳定提交、DB诊断（已按要求彻底隐藏侧边栏展示）
-# 5) ✅ 模板导入：上传区域英文全部中文化，并且“Browse files”按钮不丢失且显示为“浏览文件”
+# 4) 保留：登录权限（管理员/主管理员/普通用户可见板块配置）、form+data_editor稳定提交
+# 5) ✅ 模板导入：上传区域英文全部中文化，并且“Browse files”按钮显示为“浏览文件”
 # 6) ✅ 侧边栏：删除“数据库状态/数据状态/当前位置/功能导航”等字样（仅保留导航选项本身）
+# 7) ✅ 修复：任务/稽查员表格修改后真正写入数据库
+# 8) ✅ 修复：任务修改后，同步更新已有排班 Schedule 的时间/城市
+# 9) ✅ 修复：任务或稽查员修改后，清理智能排班/批量排班缓存，避免继续显示旧结果
 
 import csv
 import io
@@ -39,28 +42,23 @@ APP_NAME = "万宁睿和稽查排班"
 st.set_page_config(page_title=APP_NAME, layout="wide")
 
 # -------------------- ✅ 全局样式：FileUploader 英文改中文（并保证按钮存在） --------------------
-# Streamlit v1.55.0：不要“全局隐藏 span/p”，否则会把按钮区域一并干掉
 st.markdown(
     """
     <style>
     /* =========================
-       Streamlit 1.55.0 FileUploader 最终解法：
-       - 原生 file-selector-button 无法改字：用“覆盖层按钮”显示中文
-       - 原按钮透明但保留尺寸与点击
-       - 不叠字、不空白、不塌缩
+       Streamlit 1.55.0 FileUploader 最终解法
        ========================= */
 
-    /* 1) 隐藏默认英文说明区（不影响按钮区） */
     [data-testid="stFileUploaderDropzoneInstructions"]{
         display:none !important;
     }
 
-    /* 2) Dropzone 中文提示 */
     [data-testid="stFileUploaderDropzone"]{
-        position: relative !important; /* 关键：让覆盖层可定位 */
+        position: relative !important;
     }
+
     [data-testid="stFileUploaderDropzone"]::before{
-        content:"将文件拖拽到此处，或点击右侧“浏览文件”上传（支持 .xlsx，单个文件 ≤200MB）";
+        content:"将文件拖拽到此处，或点击右侧“浏览文件”上传（支持 .xlsx / .csv，单个文件 ≤200MB）";
         display:block;
         color:#333;
         padding:10px 6px 8px 6px;
@@ -69,38 +67,32 @@ st.markdown(
         white-space:normal;
     }
 
-    /* 3) 让原生 input 的按钮“保留大小但文字不可见” */
     [data-testid="stFileUploaderDropzone"] input[type="file"]{
-        width: 100% !important;
+        width:100% !important;
     }
 
-    /* Chrome/Edge 的文件按钮伪元素 */
     [data-testid="stFileUploaderDropzone"] input[type="file"]::file-selector-button{
-        min-width: 132px !important;
-        height: 42px !important;
-        padding: 0 18px !important;
-        border-radius: 10px !important;
-
-        /* 保留按钮外观/点击，但文字不可见（避免中英叠字） */
-        color: transparent !important;
-        -webkit-text-fill-color: transparent !important;
-        text-shadow: none !important;
+        min-width:132px !important;
+        height:42px !important;
+        padding:0 18px !important;
+        border-radius:10px !important;
+        color:transparent !important;
+        -webkit-text-fill-color:transparent !important;
+        text-shadow:none !important;
     }
 
-    /* 4) 在右侧“画一个可见的中文按钮”，点击穿透到底下真实按钮 */
     [data-testid="stFileUploaderDropzone"]::after{
         content:"浏览文件";
         position:absolute;
-        right: 14px;
-        top: 50%;
-        transform: translateY(-50%);
-        min-width: 132px;
-        height: 42px;
-        padding: 0 18px;
-        border-radius: 10px;
-        border: 1px solid rgba(0,0,0,0.15);
-        background: rgba(255,255,255,0.95);
-
+        right:14px;
+        top:50%;
+        transform:translateY(-50%);
+        min-width:132px;
+        height:42px;
+        padding:0 18px;
+        border-radius:10px;
+        border:1px solid rgba(0,0,0,0.15);
+        background:rgba(255,255,255,0.95);
         display:flex;
         align-items:center;
         justify-content:center;
@@ -108,13 +100,11 @@ st.markdown(
         font-weight:600;
         color:#111;
         white-space:nowrap;
-
-        pointer-events:none; /* 关键：不抢点击，让点击落到原生按钮 */
-        z-index: 9999;
-        box-sizing: border-box;
+        pointer-events:none;
+        z-index:9999;
+        box-sizing:border-box;
     }
 
-    /* 5) 窄屏兜底 */
     @media (max-width: 520px){
         [data-testid="stFileUploaderDropzone"] input[type="file"]::file-selector-button{
             min-width:124px !important;
@@ -125,7 +115,7 @@ st.markdown(
             min-width:124px;
             height:40px;
             padding:0 14px;
-            right: 12px;
+            right:12px;
             font-size:14px;
         }
         [data-testid="stFileUploaderDropzone"]::before{
@@ -157,13 +147,19 @@ def parse_date(value: str) -> date:
 
 def safe_parse_date(value) -> Optional[date]:
     """
-    ✅ 更鲁棒的日期解析：
+    更鲁棒的日期解析：
     - 支持 date / datetime / pandas Timestamp
-    - 支持 'YYYY-MM-DD'、'YYYY-MM-DD HH:MM:SS'
-    - 支持 Excel 序列号（int/float/纯数字字符串，比如 45231 或 45231.0）
+    - 支持 YYYY-MM-DD、YYYY/MM/DD、YYYY-MM-DD HH:MM:SS
+    - 支持 Excel 序列号
     """
     if value is None:
         return None
+
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
 
     if isinstance(value, datetime):
         return value.date()
@@ -230,6 +226,9 @@ def safe_commit(db: Session, context: str = "") -> bool:
 
 
 def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_return):
+    """
+    稳定拿到 data_editor 提交后的最终 DataFrame
+    """
     state = st.session_state.get(editor_key)
 
     if not isinstance(state, dict):
@@ -268,13 +267,31 @@ def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_ret
     return df
 
 
+def normalize_editor_df(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out = out.where(pd.notna(out), None)
+    return out
+
+
+def clear_schedule_related_cache():
+    for k in [
+        "recommend_result",
+        "batch_report",
+    ]:
+        if k in st.session_state:
+            st.session_state.pop(k, None)
+
+
 def _safe_int(x, default=None):
     try:
         if x is None:
             return default
         if isinstance(x, float) and pd.isna(x):
             return default
-        return int(float(str(x).strip()))
+        s = str(x).strip()
+        if s == "":
+            return default
+        return int(float(s))
     except Exception:
         return default
 
@@ -827,70 +844,135 @@ def load_day_marks():
 
 
 def save_auditor_editor(df: pd.DataFrame):
+    df = normalize_editor_df(df)
+
     with db_session() as db:
         for _, row in df.iterrows():
             rid = _safe_int(row.get("ID"), None)
             if rid is None:
                 continue
+
             obj = db.query(Auditor).filter(Auditor.id == rid).first()
             if not obj:
                 continue
-            if bool(row.get("删除", False)):
+
+            delete_flag = bool(row.get("删除", False))
+            if delete_flag:
+                db.query(Schedule).filter(Schedule.auditor_id == rid).delete()
                 db.delete(obj)
                 continue
-            obj.name = str(row.get("姓名", "")).strip()
-            obj.gender = str(row.get("性别", "")).strip() or "女"
-            obj.group_level = str(row.get("等级", "")).strip() or "B"
-            obj.can_lead_team = str(row.get("可带队", "")).strip() == "是"
-            obj.base_city = str(row.get("常驻城市", "")).strip()
+
+            obj.name = str(row.get("姓名", "") or "").strip()
+            obj.gender = str(row.get("性别", "") or "").strip() or "女"
+            obj.group_level = str(row.get("等级", "") or "").strip() or "B"
+            obj.can_lead_team = str(row.get("可带队", "") or "").strip() == "是"
+            obj.base_city = str(row.get("常驻城市", "") or "").strip()
             obj.max_weekly_tasks = _safe_int(row.get("周上限"), 0) or 0
-            obj.status = STATUS_MAP.get(str(row.get("状态", "")).strip(), "active")
+            obj.status = STATUS_MAP.get(str(row.get("状态", "") or "").strip(), "active")
             obj.monthly_cases = _safe_int(row.get("本月院次"), 0) or 0
             obj.travel_days = _safe_int(row.get("差旅天数"), 0) or 0
             obj.continuous_days = _safe_int(row.get("连续天数"), 0) or 0
             obj.last_task_end_city = str(row.get("上次结束城市", "") or "").strip() or None
-            obj.last_task_end_date = safe_parse_date(row.get("上次结束日期", None)) or date.today()
 
-        return safe_commit(db, "保存稽查员表格编辑")
+            parsed_last_date = safe_parse_date(row.get("上次结束日期", None))
+            obj.last_task_end_date = parsed_last_date if parsed_last_date else date.today()
+
+        ok = safe_commit(db, "保存稽查员表格编辑")
+        if ok:
+            clear_schedule_related_cache()
+        return ok
 
 
 def save_task_editor(df: pd.DataFrame):
+    df = normalize_editor_df(df)
+
     with db_session() as db:
         for _, row in df.iterrows():
             rid = _safe_int(row.get("ID"), None)
             if rid is None:
                 continue
+
             obj = db.query(Task).filter(Task.id == rid).first()
             if not obj:
                 continue
-            if bool(row.get("删除", False)):
+
+            delete_flag = bool(row.get("删除", False))
+            if delete_flag:
                 db.query(Schedule).filter(Schedule.task_id == rid).delete()
                 db.delete(obj)
                 continue
 
-            obj.project_name = str(row.get("项目", "")).strip()
-            obj.customer_name = str(row.get("客户", "") or "").strip() or None
-            obj.need_expert = str(row.get("需要A", "")).strip() == "是"
-            obj.required_headcount = _safe_int(row.get("人数"), 1) or 1
-            obj.required_days = _safe_int(row.get("天数"), 1) or 1
-            obj.required_gender = str(row.get("性别", "")).strip() or "不限"
-            obj.specified_auditors = str(row.get("硬指定", "") or "").strip() or None
-            obj.preferred_experts = str(row.get("软指定", "") or "").strip() or None
-            obj.site_city = str(row.get("城市", "")).strip()
+            old_start = obj.start_date
+            old_end = obj.end_date
+            old_city = obj.site_city
 
-            sd = safe_parse_date(row.get("开始", None))
-            ed = safe_parse_date(row.get("结束", None))
-            if sd:
-                obj.start_date = sd
-            if ed:
-                obj.end_date = ed
+            new_project_name = str(row.get("项目", "") or "").strip()
+            new_customer_name = str(row.get("客户", "") or "").strip() or None
+            new_need_expert = str(row.get("需要A", "") or "").strip() == "是"
+            new_required_headcount = _safe_int(row.get("人数"), 1) or 1
+            new_required_days = _safe_int(row.get("天数"), 1) or 1
+            new_required_gender = str(row.get("性别", "") or "").strip() or "不限"
+            new_specified_auditors = str(row.get("硬指定", "") or "").strip() or None
+            new_preferred_experts = str(row.get("软指定", "") or "").strip() or None
+            new_site_city = str(row.get("城市", "") or "").strip()
 
-            if obj.end_date and obj.start_date and obj.end_date < obj.start_date:
-                st.error(f"任务#{obj.id}：结束日期不能早于开始日期（{obj.start_date} ~ {obj.end_date}）")
+            new_start = safe_parse_date(row.get("开始", None))
+            new_end = safe_parse_date(row.get("结束", None))
+
+            if new_start is None:
+                new_start = obj.start_date
+            if new_end is None:
+                new_end = obj.end_date
+
+            if new_start and new_end and new_end < new_start:
+                st.error(f"任务#{obj.id}：结束日期不能早于开始日期（{new_start} ~ {new_end}）")
                 db.rollback()
                 return False
 
-        return safe_commit(db, "保存任务表格编辑")
+            obj.project_name = new_project_name
+            obj.customer_name = new_customer_name
+            obj.need_expert = new_need_expert
+            obj.required_headcount = new_required_headcount
+            obj.required_days = new_required_days
+            obj.required_gender = new_required_gender
+            obj.specified_auditors = new_specified_auditors
+            obj.preferred_experts = new_preferred_experts
+            obj.site_city = new_site_city
+            obj.start_date = new_start
+            obj.end_date = new_end
+
+            # 若任务关键字段变更，则同步更新已有排班快照
+            core_changed = (
+                old_start != new_start or
+                old_end != new_end or
+                old_city != new_site_city
+            )
+
+            if core_changed:
+                schedules = db.query(Schedule).filter(Schedule.task_id == obj.id).all()
+                for s in schedules:
+                    auditor = db.query(Auditor).filter(Auditor.id == s.auditor_id).first()
+                    if auditor:
+                        try:
+                            from_city = compute_from_city(auditor, obj)
+                        except Exception:
+                            from_city = auditor.base_city or ""
+                    else:
+                        from_city = s.travel_from_city or ""
+
+                    s.start_date = new_start
+                    s.end_date = new_end
+                    s.travel_to_city = new_site_city
+                    s.travel_from_city = from_city
+                    try:
+                        s.distance_km = float(get_distance_km(db, from_city, new_site_city))
+                    except Exception:
+                        pass
+
+        ok = safe_commit(db, "保存任务表格编辑")
+        if ok:
+            clear_schedule_related_cache()
+        return ok
 
 
 def render_data_cleanup():
@@ -910,16 +992,13 @@ def render_data_cleanup():
             db.query(CityDistance).delete()
             db.query(City).delete()
             if safe_commit(db, "清空业务数据"):
+                clear_schedule_related_cache()
                 st.success("已清空")
                 st.rerun()
 
 
 # -------------------- 侧边栏 --------------------
 st.sidebar.title(APP_NAME)
-
-# ✅ 按要求：删除“数据状态/数据库状态”等字样 => 不显示任何 DB 信息块
-# （如果你以后要恢复DB诊断，只需把该块加回即可）
-
 st.sidebar.caption(f"当前用户：{st.session_state.get('login_user', '')}")
 
 if st.sidebar.button("退出登录", key="logout_btn"):
@@ -928,6 +1007,7 @@ if st.sidebar.button("退出登录", key="logout_btn"):
     st.session_state["is_super_admin"] = False
     st.session_state.pop("login_user", None)
     st.session_state["allowed_pages"] = DEFAULT_NORMAL_PAGES[:]
+    clear_schedule_related_cache()
     st.rerun()
 
 current_user = st.session_state.get("login_user", "")
@@ -936,7 +1016,6 @@ allowed_pages = st.session_state.get("allowed_pages") or get_user_allowed_pages(
 allowed_pages = _normalize_pages(allowed_pages) if not is_admin else ALL_PAGES[:]
 st.session_state["allowed_pages"] = allowed_pages
 
-# ✅ 按要求：删除“功能导航”等字样
 page = st.sidebar.radio(
     label="",
     options=allowed_pages,
@@ -944,7 +1023,6 @@ page = st.sidebar.radio(
     label_visibility="collapsed",
 )
 
-# ✅ 右侧标题随左侧页面变更
 st.title(f"{APP_NAME}｜{page}")
 
 if (not is_admin) and (page not in allowed_pages):
@@ -1088,6 +1166,7 @@ if page == "智能排班":
                     db.delete(obj)
                     if not safe_commit(db, context=f"删除排班记录：schedule#{delete_sid}"):
                         st.stop()
+            clear_schedule_related_cache()
             st.success("已删除")
             st.rerun()
 
@@ -1178,6 +1257,7 @@ elif page == "稽查员管理":
                     )
                     if not safe_commit(db, context=f"新增稽查员：{name.strip()}"):
                         st.stop()
+                clear_schedule_related_cache()
                 st.success("已新增")
                 st.rerun()
 
@@ -1280,6 +1360,7 @@ elif page == "任务管理":
                     )
                     if not safe_commit(db, context=f"新增任务：{project_name.strip()}"):
                         st.stop()
+                clear_schedule_related_cache()
                 st.success("已新增")
                 st.rerun()
 
@@ -1360,6 +1441,7 @@ elif page == "城市距离":
                         db.add(CityDistance(from_city=a, to_city=b, km=float(km)))
                     if not safe_commit(db, context=f"城市距离新增/更新：{a}->{b}"):
                         st.stop()
+                clear_schedule_related_cache()
                 st.success("已保存")
                 st.rerun()
 
@@ -1376,6 +1458,7 @@ elif page == "城市距离":
                     db.delete(obj)
                     if not safe_commit(db, context=f"删除城市距离：dist#{delete_id}"):
                         st.stop()
+            clear_schedule_related_cache()
             st.success("已删除")
             st.rerun()
 
@@ -1403,6 +1486,7 @@ elif page == "城市坐标":
                         db.add(City(name=nm, lat=float(lat), lon=float(lon)))
                     if not safe_commit(db, context=f"城市坐标新增/更新：{nm}"):
                         st.stop()
+                clear_schedule_related_cache()
                 st.success("已保存")
                 st.rerun()
 
@@ -1437,6 +1521,7 @@ elif page == "城市坐标":
                     imported += 1
                 if not safe_commit(db, context="城市坐标 CSV 导入"):
                     st.stop()
+            clear_schedule_related_cache()
             st.success(f"已导入 / 更新 {imported} 条城市坐标。")
             st.rerun()
 
@@ -1453,6 +1538,7 @@ elif page == "城市坐标":
                     db.delete(obj)
                     if not safe_commit(db, context=f"删除城市：city#{delete_id}"):
                         st.stop()
+            clear_schedule_related_cache()
             st.success("已删除")
             st.rerun()
 
@@ -1607,6 +1693,7 @@ elif page == "模板导入":
                     imported += 1
                 if not safe_commit(db, "导入稽查员模板"):
                     st.stop()
+            clear_schedule_related_cache()
             st.success(f"已导入 / 更新 {imported} 条稽查员记录。")
             st.rerun()
 
@@ -1658,6 +1745,7 @@ elif page == "模板导入":
                     imported += 1
                 if not safe_commit(db, "导入任务模板"):
                     st.stop()
+            clear_schedule_related_cache()
             st.success(f"已导入 / 更新 {imported} 条任务记录。")
             st.rerun()
 
