@@ -1,11 +1,11 @@
-# streamlit_app.py （根目录）——完全可覆盖版（Streamlit v1.55.0 适配：上传按钮“Browse files”强制中文 + 去掉侧边栏路径/当前位置）
+# streamlit_app.py（根目录）——完全可覆盖版（Streamlit v1.55.0：上传按钮“浏览文件”必须显示 + 删除侧边栏“导航/数据状态”字样）
 # ✅ 修复点：
 # 1) safe_parse_date 支持 date/datetime/Timestamp/带时间字符串/Excel序列号（45231）等
 # 2) 保存时不再 str() 日期字段，直接传入 safe_parse_date
 # 3) 保存时增加 “结束 < 开始” 拦截，避免倒挂
-# 4) 保留：登录权限（管理员/主管理员/普通用户可见板块配置）、form+data_editor稳定提交、DB诊断等
-# 5) ✅ 模板上传区域英文完全中文化（包含按钮 Browse files -> 浏览文件）
-# 6) ✅ 侧边栏不再展示数据库路径（/mount/src/...）与“当前位置：xxx”
+# 4) 保留：登录权限（管理员/主管理员/普通用户可见板块配置）、form+data_editor稳定提交、DB诊断（已按要求彻底隐藏侧边栏展示）
+# 5) ✅ 模板导入：上传区域英文全部中文化，并且“Browse files”按钮不丢失且显示为“浏览文件”
+# 6) ✅ 侧边栏：删除“数据库状态/数据状态/当前位置/功能导航”等字样（仅保留导航选项本身）
 
 import csv
 import io
@@ -38,21 +38,17 @@ from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 APP_NAME = "万宁睿和稽查排班"
 st.set_page_config(page_title=APP_NAME, layout="wide")
 
-# -------------------- ✅ 全局样式：FileUploader 英文化为中文（Streamlit v1.55.0） --------------------
-# 说明：Streamlit 原生 file_uploader 的英文是写死在前端组件里，最稳方式是 CSS 覆盖。
+# -------------------- ✅ 全局样式：FileUploader 英文改中文（并保证按钮存在） --------------------
+# Streamlit v1.55.0：不要“全局隐藏 span/p”，否则会把按钮区域一并干掉
 st.markdown(
     """
     <style>
-    /* ====== st.file_uploader Dropzone：彻底中文化 ====== */
-
-    /* 1) 隐藏默认英文提示：Drag and drop file here / Limit ... / XLSX 等 */
-    [data-testid="stFileUploaderDropzone"] p,
-    [data-testid="stFileUploaderDropzone"] span,
-    [data-testid="stFileUploaderDropzone"] small {
+    /* 1) 只隐藏 uploader 的英文说明区（不动按钮区） */
+    [data-testid="stFileUploaderDropzoneInstructions"] {
         display: none !important;
     }
 
-    /* 2) 在 Dropzone 内插入中文提示（每个 uploader 都生效） */
+    /* 2) 在 dropzone 内插入中文提示 */
     [data-testid="stFileUploaderDropzone"]::before {
         content: "将文件拖拽到此处，或点击右侧“浏览文件”上传（支持 .xlsx，单个文件 ≤200MB）";
         display: block;
@@ -62,27 +58,45 @@ st.markdown(
         font-size: 14px;
     }
 
-    /* 3) 把右侧按钮文字强制替换为“浏览文件”
-          - v1.55.0 常见结构：button 内部有 span/文本
-          - 方案：隐藏内部文本，用 ::after 盖一层中文 */
-    [data-testid="stFileUploaderDropzone"] button {
+    /* 3) 把按钮文字“Browse files”替换成“浏览文件”
+          说明：不同前端结构可能是 button 或 role=button 的 label/div，全部兜底 */
+    [data-testid="stFileUploaderDropzone"] button,
+    [data-testid="stFileUploaderDropzone"] [role="button"] {
         position: relative !important;
     }
-    [data-testid="stFileUploaderDropzone"] button * {
-        visibility: hidden !important;   /* 隐藏内部英文 */
+
+    /* 用 font-size:0 隐藏原英文（不隐藏按钮本体，避免按钮消失） */
+    [data-testid="stFileUploaderDropzone"] button {
+        font-size: 0 !important;
     }
     [data-testid="stFileUploaderDropzone"] button::after {
         content: "浏览文件";
-        visibility: visible !important;
+        font-size: 14px;
+        font-weight: 600;
         position: absolute;
         inset: 0;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-weight: 600;
-        font-size: 14px;
+        pointer-events: none;
         color: inherit;
-        pointer-events: none; /* 不影响点击 */
+    }
+
+    /* 如果不是 button，而是 role=button 的 label/div */
+    [data-testid="stFileUploaderDropzone"] [role="button"] {
+        font-size: 0 !important;
+    }
+    [data-testid="stFileUploaderDropzone"] [role="button"]::after {
+        content: "浏览文件";
+        font-size: 14px;
+        font-weight: 600;
+        position: absolute;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        pointer-events: none;
+        color: inherit;
     }
     </style>
     """,
@@ -117,21 +131,17 @@ def safe_parse_date(value) -> Optional[date]:
     if value is None:
         return None
 
-    # 1) 已经是 date/datetime
     if isinstance(value, datetime):
         return value.date()
     if isinstance(value, date):
         return value
 
-    # 2) pandas Timestamp（避免强耦合）
     try:
         if isinstance(value, pd.Timestamp):
             return value.to_pydatetime().date()
     except Exception:
         pass
 
-    # 3) Excel 序列号（或纯数字字符串）
-    # Excel 常用起点：1899-12-30（兼容 Windows Excel）
     try:
         if isinstance(value, (int, float)) and not (isinstance(value, float) and pd.isna(value)):
             base = datetime(1899, 12, 30)
@@ -144,7 +154,6 @@ def safe_parse_date(value) -> Optional[date]:
     except Exception:
         pass
 
-    # 4) 字符串日期（允许带时间）
     s = str(value).strip()
     if not s:
         return None
@@ -186,12 +195,7 @@ def safe_commit(db: Session, context: str = "") -> bool:
         return False
 
 
-# -------------------- ✅ 终极修复：data_editor 提交与取值 --------------------
 def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_return):
-    """
-    ✅ 最终稳定版：优先从 st.session_state[editor_key] 取编辑改动。
-    本函数负责把 session_state 里的 edited_rows/deleted_rows/added_rows 合并回 df。
-    """
     state = st.session_state.get(editor_key)
 
     if not isinstance(state, dict):
@@ -241,7 +245,6 @@ def _safe_int(x, default=None):
         return default
 
 
-# -------------------- seed --------------------
 def seed_city_distances_if_needed(db: Session):
     seen = set()
     for a, b, km in SEED_CITY_DISTANCES:
@@ -289,7 +292,6 @@ with db_session() as db:
     seed_cities_if_needed(db)
 
 
-# -------------------- 登录认证 + 权限（主管理员可配置普通用户可见板块） --------------------
 ALL_PAGES = [
     "智能排班",
     "批量排班",
@@ -311,14 +313,6 @@ def hash_password(password: str) -> str:
 
 
 def ensure_auth_table():
-    """
-    auth_users 字段说明：
-    - username: 主键
-    - password_hash: 密码hash
-    - is_admin: 管理员
-    - is_super_admin: 主管理员（可配置普通账号可见板块）
-    - allowed_pages_json: 普通账号可见板块（JSON 数组）
-    """
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -461,7 +455,7 @@ def get_user_allowed_pages(username: str) -> list[str]:
     if not u:
         return DEFAULT_NORMAL_PAGES[:]
     if int(u.get("is_admin", 0)) == 1:
-        return ALL_PAGES[:]  # 管理员默认全功能
+        return ALL_PAGES[:]
     raw = u.get("allowed_pages_json") or ""
     try:
         arr = json.loads(raw) if raw else []
@@ -608,82 +602,9 @@ if "allowed_pages" not in st.session_state:
 if not st.session_state["logged_in"]:
     render_login()
 
-# -------------------- 常量 --------------------
 STATUS_MAP = {"在岗": "active", "请假": "leave", "冻结": "frozen"}
 STATUS_MAP_REV = {v: k for k, v in STATUS_MAP.items()}
 BOOL_TRUE = {"是", "Y", "y", "yes", "YES", "True", "true", "1", "是/yes"}
-
-
-# -------------------- 工具函数 --------------------
-def make_xlsx_template(headers, example_rows, sheet_name="template"):
-    from openpyxl import Workbook
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = sheet_name
-    ws.append(headers)
-    for row in example_rows:
-        ws.append(row)
-    for i, h in enumerate(headers, start=1):
-        col_letter = chr(64 + i) if i <= 26 else None
-        if col_letter:
-            ws.column_dimensions[col_letter].width = max(12, min(36, len(str(h)) * 2))
-    bio = io.BytesIO()
-    wb.save(bio)
-    bio.seek(0)
-    return bio
-
-
-def read_xlsx_rows(uploaded_file):
-    from openpyxl import load_workbook
-
-    data = uploaded_file.getvalue()
-    wb = load_workbook(io.BytesIO(data))
-    ws = wb.active
-    rows = list(ws.iter_rows(values_only=True))
-    if not rows:
-        return [], []
-    headers = [str(x).strip() if x is not None else "" for x in rows[0]]
-    out = []
-    for r in rows[1:]:
-        if not r or all(x is None or str(x).strip() == "" for x in r):
-            continue
-        first = str(r[0]).strip() if r[0] is not None else ""
-        if first in ("必填", "说明", "字段说明"):
-            continue
-        out.append(list(r))
-    return headers, out
-
-
-def find_idx(headers, aliases: list[str]) -> Optional[int]:
-    for cand in aliases:
-        for i, h in enumerate(headers):
-            if str(h).strip() == str(cand).strip():
-                return i
-    for cand in aliases:
-        for i, h in enumerate(headers):
-            if str(h).strip().startswith(str(cand).strip()):
-                return i
-    return None
-
-
-def build_excel_bytes(headers: list[str], rows: list[list]):
-    from openpyxl import Workbook
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "sheet1"
-    ws.append(headers)
-    for r in rows:
-        ws.append(r)
-    for i, h in enumerate(headers, start=1):
-        col_letter = chr(64 + i) if i <= 26 else None
-        if col_letter:
-            ws.column_dimensions[col_letter].width = max(12, min(40, len(str(h)) * 2))
-    bio = io.BytesIO()
-    wb.save(bio)
-    bio.seek(0)
-    return bio
 
 
 def ics_escape(s: str) -> str:
@@ -894,8 +815,6 @@ def save_auditor_editor(df: pd.DataFrame):
             obj.travel_days = _safe_int(row.get("差旅天数"), 0) or 0
             obj.continuous_days = _safe_int(row.get("连续天数"), 0) or 0
             obj.last_task_end_city = str(row.get("上次结束城市", "") or "").strip() or None
-
-            # ✅ 关键：不再 str()，直接交给 safe_parse_date
             obj.last_task_end_date = safe_parse_date(row.get("上次结束日期", None)) or date.today()
 
         return safe_commit(db, "保存稽查员表格编辑")
@@ -925,7 +844,6 @@ def save_task_editor(df: pd.DataFrame):
             obj.preferred_experts = str(row.get("软指定", "") or "").strip() or None
             obj.site_city = str(row.get("城市", "")).strip()
 
-            # ✅ 关键：不再 str()，直接交给 safe_parse_date（可吃 Timestamp/Excel序列号）
             sd = safe_parse_date(row.get("开始", None))
             ed = safe_parse_date(row.get("结束", None))
             if sd:
@@ -933,7 +851,6 @@ def save_task_editor(df: pd.DataFrame):
             if ed:
                 obj.end_date = ed
 
-            # ✅ 拦截：避免保存后出现 结束 < 开始
             if obj.end_date and obj.start_date and obj.end_date < obj.start_date:
                 st.error(f"任务#{obj.id}：结束日期不能早于开始日期（{obj.start_date} ~ {obj.end_date}）")
                 db.rollback()
@@ -966,15 +883,8 @@ def render_data_cleanup():
 # -------------------- 侧边栏 --------------------
 st.sidebar.title(APP_NAME)
 
-# DB 诊断：不展示路径，只展示状态（避免 /mount/src/...）
-from app import db as dbmod
-p = Path(str(getattr(dbmod, "DB_FILE", "")))
-
-st.sidebar.write("✅ 数据库状态：")
-if p and p.exists():
-    st.sidebar.write(f"存在：True | 大小：{p.stat().st_size} bytes | 修改时间：{datetime.fromtimestamp(p.stat().st_mtime)}")
-else:
-    st.sidebar.write("存在：False（说明还没生成/或路径不对）")
+# ✅ 按要求：删除“数据状态/数据库状态”等字样 => 不显示任何 DB 信息块
+# （如果你以后要恢复DB诊断，只需把该块加回即可）
 
 st.sidebar.caption(f"当前用户：{st.session_state.get('login_user', '')}")
 
@@ -986,16 +896,19 @@ if st.sidebar.button("退出登录", key="logout_btn"):
     st.session_state["allowed_pages"] = DEFAULT_NORMAL_PAGES[:]
     st.rerun()
 
-# 基于账号权限过滤可见功能
 current_user = st.session_state.get("login_user", "")
 is_admin = bool(st.session_state.get("is_admin", False))
 allowed_pages = st.session_state.get("allowed_pages") or get_user_allowed_pages(current_user)
 allowed_pages = _normalize_pages(allowed_pages) if not is_admin else ALL_PAGES[:]
 st.session_state["allowed_pages"] = allowed_pages
 
-page = st.sidebar.radio("功能导航", allowed_pages, key="nav_radio")
-# ✅ 删除“当前位置：xxx”
-# st.sidebar.caption(f"当前位置：{page}")
+# ✅ 按要求：删除“功能导航”等字样
+page = st.sidebar.radio(
+    label="",
+    options=allowed_pages,
+    key="nav_radio",
+    label_visibility="collapsed",
+)
 
 # ✅ 右侧标题随左侧页面变更
 st.title(f"{APP_NAME}｜{page}")
@@ -1515,6 +1428,55 @@ elif page == "模板导入":
     st.subheader("模板导入")
     st.caption("下载模板 → 填写 → 上传导入，支持新增/更新。")
 
+    def make_xlsx_template(headers, example_rows, sheet_name="template"):
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = sheet_name
+        ws.append(headers)
+        for row in example_rows:
+            ws.append(row)
+        for i, h in enumerate(headers, start=1):
+            col_letter = chr(64 + i) if i <= 26 else None
+            if col_letter:
+                ws.column_dimensions[col_letter].width = max(12, min(36, len(str(h)) * 2))
+        bio = io.BytesIO()
+        wb.save(bio)
+        bio.seek(0)
+        return bio
+
+    def read_xlsx_rows(uploaded_file):
+        from openpyxl import load_workbook
+
+        data = uploaded_file.getvalue()
+        wb = load_workbook(io.BytesIO(data))
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            return [], []
+        headers = [str(x).strip() if x is not None else "" for x in rows[0]]
+        out = []
+        for r in rows[1:]:
+            if not r or all(x is None or str(x).strip() == "" for x in r):
+                continue
+            first = str(r[0]).strip() if r[0] is not None else ""
+            if first in ("必填", "说明", "字段说明"):
+                continue
+            out.append(list(r))
+        return headers, out
+
+    def find_idx(headers, aliases: list[str]) -> Optional[int]:
+        for cand in aliases:
+            for i, h in enumerate(headers):
+                if str(h).strip() == str(cand).strip():
+                    return i
+        for cand in aliases:
+            for i, h in enumerate(headers):
+                if str(h).strip().startswith(str(cand).strip()):
+                    return i
+        return None
+
     headers_a = [
         "姓名",
         "性别(男/女)",
@@ -1792,9 +1754,17 @@ elif page == "日历视图":
         )
     show_table(rows, 320)
     if rows:
-        headers_excel = list(rows[0].keys())
-        excel_rows = [list(r.values()) for r in rows]
-        bio = build_excel_bytes(headers_excel, excel_rows)
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "sheet1"
+        ws.append(list(rows[0].keys()))
+        for r in rows:
+            ws.append(list(r.values()))
+        bio = io.BytesIO()
+        wb.save(bio)
+        bio.seek(0)
         st.download_button(
             "导出本月排班明细（Excel）",
             bio.getvalue(),
