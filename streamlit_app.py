@@ -58,9 +58,8 @@ st.markdown(
         white-space:normal;
     }
 
-    /* 3) 统一定位按钮（button 或 role=button） */
-    [data-testid="stFileUploaderDropzone"] button,
-    [data-testid="stFileUploaderDropzone"] [role="button"]{
+    /* 3) 按钮尺寸与布局（避免塌缩） */
+    [data-testid="stFileUploaderDropzone"] button{
         min-width: 132px !important;
         height: 42px !important;
         padding: 0 18px !important;
@@ -71,52 +70,50 @@ st.markdown(
         align-items: center !important;
         justify-content: center !important;
         white-space: nowrap !important;
-        overflow: hidden !important;
+        overflow: visible !important;   /* 关键：别裁掉 ::after */
+    }
 
-        /* ✅ 关键：按钮自身文字透明（含文本节点） */
+    /* 4) 只隐藏英文：把 button 的“文字颜色”设透明，但不要动子元素 */
+    [data-testid="stFileUploaderDropzone"] button{
         color: transparent !important;
         -webkit-text-fill-color: transparent !important;
         text-shadow: none !important;
     }
 
-    /* ✅ 关键：把按钮内部所有子元素也强制透明（防止 span 单独染色导致残留英文） */
-    [data-testid="stFileUploaderDropzone"] button *,
-    [data-testid="stFileUploaderDropzone"] [role="button"] *{
+    /* 5) 如果英文在 span 里：把 span 文字也隐藏，但不要全局 *（避免影响 ::after） */
+    [data-testid="stFileUploaderDropzone"] button span{
         color: transparent !important;
         -webkit-text-fill-color: transparent !important;
         text-shadow: none !important;
     }
 
-    /* ✅ 可选但强烈建议：隐藏按钮内部图标（常见是 svg）避免挤压叠字 */
-    [data-testid="stFileUploaderDropzone"] button svg,
-    [data-testid="stFileUploaderDropzone"] [role="button"] svg{
+    /* 6) 显示中文：用 ::after 叠加，并强制置顶 */
+    [data-testid="stFileUploaderDropzone"] button::after{
+        content:"浏览文件" !important;
+        position:absolute !important;
+        left:0; right:0; top:0; bottom:0;
+        display:flex !important;
+        align-items:center !important;
+        justify-content:center !important;
+        font-size:14px !important;
+        font-weight:600 !important;
+        letter-spacing:0.5px !important;
+        color:#111 !important;
+        pointer-events:none !important;
+        white-space:nowrap !important;
+        z-index: 9999 !important;      /* 关键：防止被盖住 */
+    }
+
+    /* 7) 如果按钮带图标，隐藏图标，避免挤压（但不影响文字显示） */
+    [data-testid="stFileUploaderDropzone"] button svg{
         display:none !important;
     }
 
-    /* 4) 叠加中文按钮文字（真正显示的文本） */
-    [data-testid="stFileUploaderDropzone"] button::after,
-    [data-testid="stFileUploaderDropzone"] [role="button"]::after{
-        content:"浏览文件";
-        position:absolute;
-        inset:0;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        font-size:14px;
-        font-weight:600;
-        letter-spacing:0.5px;
-        color:#111;
-        pointer-events:none;
-        white-space:nowrap;
-    }
-
-    /* 5) 窄屏兜底 */
     @media (max-width: 520px){
-        [data-testid="stFileUploaderDropzone"] button,
-        [data-testid="stFileUploaderDropzone"] [role="button"]{
-            min-width: 124px !important;
-            height: 40px !important;
-            padding: 0 14px !important;
+        [data-testid="stFileUploaderDropzone"] button{
+            min-width:124px !important;
+            height:40px !important;
+            padding:0 14px !important;
         }
         [data-testid="stFileUploaderDropzone"]::before{
             font-size:13px;
