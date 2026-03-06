@@ -44,17 +44,21 @@ st.markdown(
     """
     <style>
     /* =========================
-       Streamlit 1.55 FileUploader 中文化（最终稳定版）
-       - 命中 button / label / [role=button] 多种结构
+       Streamlit 1.55.0 FileUploader 最终解法：
+       - 原生 file-selector-button 无法改字：用“覆盖层按钮”显示中文
+       - 原按钮透明但保留尺寸与点击
        - 不叠字、不空白、不塌缩
        ========================= */
 
-    /* 1) 隐藏默认英文说明区（不影响按钮） */
+    /* 1) 隐藏默认英文说明区（不影响按钮区） */
     [data-testid="stFileUploaderDropzoneInstructions"]{
         display:none !important;
     }
 
     /* 2) Dropzone 中文提示 */
+    [data-testid="stFileUploaderDropzone"]{
+        position: relative !important; /* 关键：让覆盖层可定位 */
+    }
     [data-testid="stFileUploaderDropzone"]::before{
         content:"将文件拖拽到此处，或点击右侧“浏览文件”上传（支持 .xlsx，单个文件 ≤200MB）";
         display:block;
@@ -65,72 +69,64 @@ st.markdown(
         white-space:normal;
     }
 
-    /* 3) 找到“浏览文件”点击控件（可能是 button / label / role=button） */
-    [data-testid="stFileUploaderDropzone"] button,
-    [data-testid="stFileUploaderDropzone"] label,
-    [data-testid="stFileUploaderDropzone"] [role="button"],
-    [data-testid="stFileUploaderDropzone"] [data-testid^="baseButton-"]{
+    /* 3) 让原生 input 的按钮“保留大小但文字不可见” */
+    [data-testid="stFileUploaderDropzone"] input[type="file"]{
+        width: 100% !important;
+    }
+
+    /* Chrome/Edge 的文件按钮伪元素 */
+    [data-testid="stFileUploaderDropzone"] input[type="file"]::file-selector-button{
         min-width: 132px !important;
         height: 42px !important;
         padding: 0 18px !important;
         border-radius: 10px !important;
 
-        position: relative !important;
-        display: inline-flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        white-space: nowrap !important;
-        overflow: visible !important;
-
-        /* ✅ 关键：隐藏原英文（含文本节点），但保留控件尺寸 */
+        /* 保留按钮外观/点击，但文字不可见（避免中英叠字） */
         color: transparent !important;
         -webkit-text-fill-color: transparent !important;
         text-shadow: none !important;
     }
 
-    /* 4) 也把内部常见承载文字的 span 透明（避免叠字） */
-    [data-testid="stFileUploaderDropzone"] button span,
-    [data-testid="stFileUploaderDropzone"] label span,
-    [data-testid="stFileUploaderDropzone"] [role="button"] span{
-        color: transparent !important;
-        -webkit-text-fill-color: transparent !important;
-        text-shadow: none !important;
+    /* 4) 在右侧“画一个可见的中文按钮”，点击穿透到底下真实按钮 */
+    [data-testid="stFileUploaderDropzone"]::after{
+        content:"浏览文件";
+        position:absolute;
+        right: 14px;
+        top: 50%;
+        transform: translateY(-50%);
+        min-width: 132px;
+        height: 42px;
+        padding: 0 18px;
+        border-radius: 10px;
+        border: 1px solid rgba(0,0,0,0.15);
+        background: rgba(255,255,255,0.95);
+
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        font-size:14px;
+        font-weight:600;
+        color:#111;
+        white-space:nowrap;
+
+        pointer-events:none; /* 关键：不抢点击，让点击落到原生按钮 */
+        z-index: 9999;
+        box-sizing: border-box;
     }
 
-    /* 5) 覆盖中文文案：对 button/label/role=button 都写 ::after（确保命中真实控件） */
-    [data-testid="stFileUploaderDropzone"] button::after,
-    [data-testid="stFileUploaderDropzone"] label::after,
-    [data-testid="stFileUploaderDropzone"] [role="button"]::after,
-    [data-testid="stFileUploaderDropzone"] [data-testid^="baseButton-"]::after{
-        content:"浏览文件" !important;
-        position:absolute !important;
-        inset:0 !important;
-        display:flex !important;
-        align-items:center !important;
-        justify-content:center !important;
-        font-size:14px !important;
-        font-weight:600 !important;
-        letter-spacing:0.5px !important;
-        color:#111 !important;          /* 不继承 transparent */
-        pointer-events:none !important; /* 不影响点击 */
-        white-space:nowrap !important;
-        z-index: 9999 !important;
-    }
-
-    /* 6) 图标（如果有）隐藏，避免挤压导致错位 */
-    [data-testid="stFileUploaderDropzone"] svg{
-        display:none !important;
-    }
-
-    /* 7) 窄屏兜底 */
+    /* 5) 窄屏兜底 */
     @media (max-width: 520px){
-        [data-testid="stFileUploaderDropzone"] button,
-        [data-testid="stFileUploaderDropzone"] label,
-        [data-testid="stFileUploaderDropzone"] [role="button"],
-        [data-testid="stFileUploaderDropzone"] [data-testid^="baseButton-"]{
+        [data-testid="stFileUploaderDropzone"] input[type="file"]::file-selector-button{
             min-width:124px !important;
             height:40px !important;
             padding:0 14px !important;
+        }
+        [data-testid="stFileUploaderDropzone"]::after{
+            min-width:124px;
+            height:40px;
+            padding:0 14px;
+            right: 12px;
+            font-size:14px;
         }
         [data-testid="stFileUploaderDropzone"]::before{
             font-size:13px;
