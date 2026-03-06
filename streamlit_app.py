@@ -40,70 +40,86 @@ st.set_page_config(page_title=APP_NAME, layout="wide")
 # - 改为：仅把原英文文本 opacity=0（保留布局宽度），再用 ::after 叠加“浏览文件”
 # - 强制给按钮 min-width/height/padding，使其在窄屏也合理
 st.markdown(
-  st.markdown(
     """
     <style>
-    /* 1) 仅隐藏 uploader 默认英文说明区（不动按钮区） */
-    [data-testid="stFileUploaderDropzoneInstructions"] {
-        display: none !important;
+    /* 1) 隐藏 uploader 默认英文说明区（不动按钮区） */
+    [data-testid="stFileUploaderDropzoneInstructions"]{
+        display:none !important;
     }
 
     /* 2) Dropzone 中文提示 */
-    [data-testid="stFileUploaderDropzone"]::before {
-        content: "将文件拖拽到此处，或点击右侧“浏览文件”上传（支持 .xlsx，单个文件 ≤200MB）";
-        display: block;
-        color: #333;
-        padding: 10px 6px 8px 6px;
-        line-height: 1.5;
-        font-size: 14px;
-        white-space: normal;
+    [data-testid="stFileUploaderDropzone"]::before{
+        content:"将文件拖拽到此处，或点击右侧“浏览文件”上传（支持 .xlsx，单个文件 ≤200MB）";
+        display:block;
+        color:#333;
+        padding:10px 6px 8px 6px;
+        line-height:1.5;
+        font-size:14px;
+        white-space:normal;
     }
 
-    /* 3) 定位到按钮（不同版本可能是 button 或 role=button） */
+    /* 3) 统一定位按钮（button 或 role=button） */
     [data-testid="stFileUploaderDropzone"] button,
-    [data-testid="stFileUploaderDropzone"] [role="button"] {
-        min-width: 120px !important;
-        height: 40px !important;
-        padding: 0 16px !important;
+    [data-testid="stFileUploaderDropzone"] [role="button"]{
+        min-width: 132px !important;
+        height: 42px !important;
+        padding: 0 18px !important;
         border-radius: 10px !important;
+
         position: relative !important;
         display: inline-flex !important;
         align-items: center !important;
         justify-content: center !important;
         white-space: nowrap !important;
+        overflow: hidden !important;
 
-        /* ✅ 关键：隐藏按钮自身“所有文字”（包括直接文本节点 Browse files） */
+        /* ✅ 关键：按钮自身文字透明（含文本节点） */
         color: transparent !important;
         -webkit-text-fill-color: transparent !important;
         text-shadow: none !important;
     }
 
-    /* 4) 叠加中文按钮文字 */
+    /* ✅ 关键：把按钮内部所有子元素也强制透明（防止 span 单独染色导致残留英文） */
+    [data-testid="stFileUploaderDropzone"] button *,
+    [data-testid="stFileUploaderDropzone"] [role="button"] *{
+        color: transparent !important;
+        -webkit-text-fill-color: transparent !important;
+        text-shadow: none !important;
+    }
+
+    /* ✅ 可选但强烈建议：隐藏按钮内部图标（常见是 svg）避免挤压叠字 */
+    [data-testid="stFileUploaderDropzone"] button svg,
+    [data-testid="stFileUploaderDropzone"] [role="button"] svg{
+        display:none !important;
+    }
+
+    /* 4) 叠加中文按钮文字（真正显示的文本） */
     [data-testid="stFileUploaderDropzone"] button::after,
-    [data-testid="stFileUploaderDropzone"] [role="button"]::after {
-        content: "浏览文件";
-        position: absolute;
-        inset: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 14px;
-        font-weight: 600;
-        pointer-events: none; /* 不影响点击 */
-        color: #111;          /* 直接指定中文颜色，避免继承 transparent */
-        white-space: nowrap;
+    [data-testid="stFileUploaderDropzone"] [role="button"]::after{
+        content:"浏览文件";
+        position:absolute;
+        inset:0;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        font-size:14px;
+        font-weight:600;
+        letter-spacing:0.5px;
+        color:#111;
+        pointer-events:none;
+        white-space:nowrap;
     }
 
     /* 5) 窄屏兜底 */
-    @media (max-width: 520px) {
+    @media (max-width: 520px){
         [data-testid="stFileUploaderDropzone"] button,
-        [data-testid="stFileUploaderDropzone"] [role="button"] {
-            min-width: 110px !important;
-            height: 38px !important;
-            padding: 0 12px !important;
+        [data-testid="stFileUploaderDropzone"] [role="button"]{
+            min-width: 124px !important;
+            height: 40px !important;
+            padding: 0 14px !important;
         }
-        [data-testid="stFileUploaderDropzone"]::before {
-            font-size: 13px;
+        [data-testid="stFileUploaderDropzone"]::before{
+            font-size:13px;
         }
     }
     </style>
