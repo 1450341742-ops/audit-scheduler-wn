@@ -29,7 +29,6 @@ from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 APP_NAME = "万宁睿和稽查排班"
 st.set_page_config(page_title=APP_NAME, layout="wide")
 
-# -------------------- 全局样式：FileUploader 英文改中文（并保证按钮存在） --------------------
 st.markdown(
     """
     <style>
@@ -110,7 +109,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# -------------------- 初始化 --------------------
 Base.metadata.create_all(bind=engine)
 ensure_schema()
 
@@ -124,17 +122,7 @@ def db_session():
         db.close()
 
 
-def parse_date(value: str) -> date:
-    return datetime.strptime(str(value).strip(), "%Y-%m-%d").date()
-
-
 def safe_parse_date(value) -> Optional[date]:
-    """
-    更鲁棒的日期解析：
-    - 支持 date / datetime / pandas Timestamp
-    - 支持 'YYYY-MM-DD'、'YYYY-MM-DD HH:MM:SS'
-    - 支持 Excel 序列号（45231 / 45231.0）
-    """
     if value is None:
         return None
 
@@ -191,7 +179,7 @@ def d2s(v: Optional[date]) -> str:
     return v.strftime("%Y-%m-%d") if v else ""
 
 
-def show_table(rows: list[dict], height: int = 380, key: str | None = None):
+def show_table(rows: list[dict], height: int = 380):
     if not rows:
         st.info("暂无数据")
         return
@@ -227,48 +215,11 @@ def clear_runtime_caches_after_data_change():
             st.session_state.pop(k, None)
 
 
-def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_return):
-    """
-    优先使用 data_editor 返回值；
-    若返回异常，再回退 session_state 补丁。
-    """
-    if isinstance(editor_return, pd.DataFrame):
-        df = editor_return.copy()
-        return df.astype(object)
-
-    state = st.session_state.get(editor_key)
-    if not isinstance(state, dict):
-        return original_df.copy().astype(object)
-
-    df = original_df.copy().astype(object)
-
-    edited_rows = state.get("edited_rows") or {}
-    for ridx, changes in edited_rows.items():
-        try:
-            ridx = int(ridx)
-        except Exception:
-            continue
-        if ridx < 0 or ridx >= len(df):
-            continue
-        for col, val in (changes or {}).items():
-            if col in df.columns:
-                df.at[ridx, col] = val
-
-    deleted_rows = state.get("deleted_rows") or []
-    if deleted_rows:
-        try:
-            df = df.drop(index=[int(i) for i in deleted_rows]).reset_index(drop=True)
-        except Exception:
-            pass
-
-    added_rows = state.get("added_rows") or []
-    if added_rows:
-        try:
-            df = pd.concat([df, pd.DataFrame(added_rows)], ignore_index=True)
-        except Exception:
-            pass
-
-    return df.astype(object)
+def get_editor_final_df(editor_key: str, fallback_df: pd.DataFrame) -> pd.DataFrame:
+    val = st.session_state.get(editor_key, None)
+    if isinstance(val, pd.DataFrame):
+        return val.copy().astype(object)
+    return fallback_df.copy().astype(object)
 
 
 def _safe_int(x, default=None):
@@ -362,7 +313,6 @@ ALL_PAGES = [
     "账号管理",
     "数据清理",
 ]
-
 DEFAULT_NORMAL_PAGES = ["任务管理", "稽查员管理", "日历视图"]
 
 
@@ -564,7 +514,6 @@ def create_auth_user(username: str, password: str, is_admin: bool = False, is_su
         is_admin = True
 
     allowed = None if is_admin else json.dumps(DEFAULT_NORMAL_PAGES, ensure_ascii=False)
-
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -719,8 +668,8 @@ def assign_team_to_task(db: Session, task: Task, leader_id: int, member_ids: lis
 
     start_date = task.start_date
     end_date = task.end_date or (task.start_date + timedelta(days=max(1, int(task.required_days or 1)) - 1))
-
     selected_ids = [int(leader_id)] + [int(x) for x in member_ids if int(x) != int(leader_id)]
+
     for aid in selected_ids:
         existing = db.query(Schedule).filter(Schedule.auditor_id == aid).all()
         for s in existing:
@@ -890,7 +839,7 @@ def save_auditor_editor(df: pd.DataFrame):
                     obj.name = name
                     obj.gender = normalize_text(row.get("性别")) or "女"
                     obj.group_level = normalize_text(row.get("等级")) or "B"
-                    obj.can_lead_team = (normalize_text(row.get("可带队")) == "是")
+                    obj.can_lead_team = normalize_text(row.get("可带队")) == "是"
                     obj.base_city = base_city
                     obj.max_weekly_tasks = _safe_int(row.get("周上限"), obj.max_weekly_tasks or 0) or 0
                     obj.status = STATUS_MAP.get(normalize_text(row.get("状态")), obj.status or "active")
@@ -927,13 +876,6 @@ def save_auditor_editor(df: pd.DataFrame):
 
 
 def save_task_editor(df: pd.DataFrame):
-    """
-    任务表格稳定保存版：
-    - 某一行异常时不影响整表
-    - 开始/结束日期异常时尽量自动修正
-    - 若结束 < 开始，优先按“天数”或原 required_days 自动重算
-    - 若仍无法修正，只跳过该行
-    """
     df = df.copy().astype(object)
     errors = []
     saved_count = 0
@@ -960,7 +902,6 @@ def save_task_editor(df: pd.DataFrame):
                 try:
                     project_name = normalize_text(row.get("项目"))
                     site_city = normalize_text(row.get("城市"))
-
                     if not project_name:
                         errors.append(f"任务#{rid}：项目名称为空，已跳过")
                         continue
@@ -968,36 +909,26 @@ def save_task_editor(df: pd.DataFrame):
                         errors.append(f"任务#{rid}：中心城市为空，已跳过")
                         continue
 
-                    raw_start = row.get("开始", None)
-                    raw_end = row.get("结束", None)
-                    raw_days = row.get("天数", None)
+                    days = _safe_int(row.get("天数"), None)
+                    headcount = _safe_int(row.get("人数"), None)
+                    sd = safe_parse_date(row.get("开始"))
+                    ed = safe_parse_date(row.get("结束"))
 
-                    sd = safe_parse_date(raw_start)
-                    ed = safe_parse_date(raw_end)
-                    days = _safe_int(raw_days, None)
-
-                    # 开始日期无效：保留数据库原值
                     if sd is None:
                         sd = obj.start_date
 
-                    # 结束日期无效：优先按天数算，否则保留数据库原值
                     if ed is None:
                         if days is not None and days >= 1 and sd is not None:
                             ed = sd + timedelta(days=days - 1)
                         else:
                             ed = obj.end_date
 
-                    # 若日期反了，优先按天数重算
                     if sd and ed and ed < sd:
                         if days is not None and days >= 1:
                             ed = sd + timedelta(days=days - 1)
                         elif obj.required_days and int(obj.required_days) >= 1:
                             ed = sd + timedelta(days=int(obj.required_days) - 1)
-                        else:
-                            errors.append(f"任务#{rid}：结束日期早于开始日期，且无法自动修正，已跳过（{sd} ~ {ed}）")
-                            continue
 
-                    # 最终兜底
                     if sd is None:
                         errors.append(f"任务#{rid}：开始日期无效，已跳过")
                         continue
@@ -1012,8 +943,8 @@ def save_task_editor(df: pd.DataFrame):
 
                     obj.project_name = project_name
                     obj.customer_name = normalize_text(row.get("客户")) or None
-                    obj.need_expert = (normalize_text(row.get("需要A")) == "是")
-                    obj.required_headcount = _safe_int(row.get("人数"), obj.required_headcount or 1) or 1
+                    obj.need_expert = normalize_text(row.get("需要A")) == "是"
+                    obj.required_headcount = headcount if (headcount is not None and headcount >= 1) else (obj.required_headcount or 1)
                     obj.required_days = final_days
                     obj.required_gender = normalize_text(row.get("性别")) or "不限"
                     obj.specified_auditors = normalize_text(row.get("硬指定")) or None
@@ -1074,7 +1005,6 @@ def render_data_cleanup():
                 st.rerun()
 
 
-# -------------------- 侧边栏 --------------------
 st.sidebar.title(APP_NAME)
 st.sidebar.caption(f"当前用户：{st.session_state.get('login_user', '')}")
 
@@ -1107,7 +1037,6 @@ if (not is_admin) and (page not in allowed_pages):
     st.stop()
 
 
-# -------------------- 页面：智能排班 --------------------
 if page == "智能排班":
     st.subheader("智能排班")
     st.caption("先按硬约束筛选，再按距离优先 + 适度负荷均衡评分推荐。")
@@ -1247,8 +1176,6 @@ if page == "智能排班":
             st.success("已删除")
             st.rerun()
 
-
-# -------------------- 页面：批量排班 --------------------
 elif page == "批量排班":
     st.subheader("批量排班")
     st.caption("只会处理未排过的任务；按 need_expert 优先 > 人数多优先 > 开始日期早 排序。")
@@ -1288,8 +1215,6 @@ elif page == "批量排班":
             else:
                 st.info("无")
 
-
-# -------------------- 页面：稽查员管理 --------------------
 elif page == "稽查员管理":
     st.subheader("稽查员管理")
     with st.form("auditor_form", clear_on_submit=True):
@@ -1365,36 +1290,38 @@ elif page == "稽查员管理":
     if rows:
         st.caption("支持在表格内直接修改；勾选“删除”后点保存，即可删除对应人员。")
         df = pd.DataFrame(rows).astype(object)
-        for col in ["上次结束日期", "上次结束城市", "姓名", "性别", "等级", "可带队", "常驻城市", "状态"]:
+        for col in ["姓名", "性别", "等级", "可带队", "常驻城市", "状态", "上次结束城市", "上次结束日期"]:
             if col in df.columns:
                 df[col] = df[col].astype(str)
 
-        with st.form("auditor_editor_form", clear_on_submit=False):
-            editor_return = st.data_editor(
-                df,
-                use_container_width=True,
-                hide_index=True,
-                num_rows="fixed",
-                key="auditor_editor",
-                column_config={
-                    "ID": st.column_config.NumberColumn(disabled=True),
-                    "上次结束日期": st.column_config.TextColumn(help="格式：YYYY-MM-DD（也支持时间/Excel序列号）"),
-                    "删除": st.column_config.CheckboxColumn(),
-                },
-            )
-            submitted = st.form_submit_button("保存稽查员表格修改", type="primary")
+        st.data_editor(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            key="auditor_editor",
+            column_config={
+                "ID": st.column_config.NumberColumn("ID", disabled=True),
+                "姓名": st.column_config.TextColumn("姓名"),
+                "性别": st.column_config.SelectboxColumn("性别", options=["女", "男"]),
+                "等级": st.column_config.SelectboxColumn("等级", options=["A", "B", "C"]),
+                "可带队": st.column_config.SelectboxColumn("可带队", options=["是", "否"]),
+                "状态": st.column_config.SelectboxColumn("状态", options=["在岗", "请假", "冻结"]),
+                "上次结束日期": st.column_config.TextColumn("上次结束日期", help="格式：YYYY-MM-DD（也支持时间/Excel序列号）"),
+                "删除": st.column_config.CheckboxColumn("删除"),
+            },
+        )
 
-        if submitted:
-            final_df = materialize_editor_df(df, "auditor_editor", editor_return)
-            ok = save_auditor_editor(pd.DataFrame(final_df))
+        if st.button("保存稽查员表格修改", type="primary", key="save_auditor_editor_btn"):
+            final_df = get_editor_final_df("auditor_editor", df)
+            ok = save_auditor_editor(final_df)
             if ok:
                 clear_runtime_caches_after_data_change()
+                st.success("稽查员表格修改已保存")
                 st.rerun()
     else:
         st.info("暂无数据")
 
-
-# -------------------- 页面：任务管理 --------------------
 elif page == "任务管理":
     st.subheader("任务管理")
     with st.form("task_form", clear_on_submit=True):
@@ -1474,33 +1401,37 @@ elif page == "任务管理":
             if col in df.columns:
                 df[col] = df[col].astype(str)
 
-        with st.form("task_editor_form", clear_on_submit=False):
-            editor_return = st.data_editor(
-                df,
-                use_container_width=True,
-                hide_index=True,
-                num_rows="fixed",
-                key="task_editor",
-                column_config={
-                    "ID": st.column_config.NumberColumn(disabled=True),
-                    "开始": st.column_config.TextColumn(help="格式：YYYY-MM-DD（也支持时间/Excel序列号）"),
-                    "结束": st.column_config.TextColumn(help="格式：YYYY-MM-DD（也支持时间/Excel序列号）"),
-                    "删除": st.column_config.CheckboxColumn(),
-                },
-            )
-            submitted = st.form_submit_button("保存任务表格修改", type="primary")
+        st.data_editor(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            key="task_editor",
+            column_config={
+                "ID": st.column_config.NumberColumn("ID", disabled=True),
+                "项目": st.column_config.TextColumn("项目"),
+                "客户": st.column_config.TextColumn("客户"),
+                "需要A": st.column_config.SelectboxColumn("需要A", options=["是", "否"]),
+                "人数": st.column_config.NumberColumn("人数", min_value=1, step=1),
+                "天数": st.column_config.NumberColumn("天数", min_value=1, step=1),
+                "性别": st.column_config.SelectboxColumn("性别", options=["不限", "男", "女"]),
+                "城市": st.column_config.TextColumn("城市"),
+                "开始": st.column_config.TextColumn("开始", help="格式：YYYY-MM-DD（也支持时间/Excel序列号）"),
+                "结束": st.column_config.TextColumn("结束", help="格式：YYYY-MM-DD（也支持时间/Excel序列号）"),
+                "删除": st.column_config.CheckboxColumn("删除"),
+            },
+        )
 
-        if submitted:
-            final_df = materialize_editor_df(df, "task_editor", editor_return)
-            ok = save_task_editor(pd.DataFrame(final_df))
+        if st.button("保存任务表格修改", type="primary", key="save_task_editor_btn"):
+            final_df = get_editor_final_df("task_editor", df)
+            ok = save_task_editor(final_df)
             if ok:
                 clear_runtime_caches_after_data_change()
+                st.success("任务表格修改已保存")
                 st.rerun()
     else:
         st.info("暂无数据")
 
-
-# -------------------- 页面：城市距离 --------------------
 elif page == "城市距离":
     st.subheader("城市距离")
     st.caption("系统会优先读取距离表；若未命中，会尝试按城市坐标自动计算并写回缓存。")
@@ -1544,8 +1475,6 @@ elif page == "城市距离":
             st.success("已删除")
             st.rerun()
 
-
-# -------------------- 页面：城市坐标 --------------------
 elif page == "城市坐标":
     st.subheader("城市坐标")
     st.caption("用于自动计算全国城市直线距离；CSV 格式：name,lat,lon。")
@@ -1624,8 +1553,6 @@ elif page == "城市坐标":
             st.success("已删除")
             st.rerun()
 
-
-# -------------------- 页面：模板导入 --------------------
 elif page == "模板导入":
     st.subheader("模板导入")
     st.caption("下载模板 → 填写 → 上传导入，支持新增/更新。")
@@ -1680,18 +1607,9 @@ elif page == "模板导入":
         return None
 
     headers_a = [
-        "姓名",
-        "性别(男/女)",
-        "等级(A/B/C)",
-        "可带队(是/否)",
-        "常驻城市",
-        "每周上限(院次)",
-        "状态(在岗/请假/冻结)",
-        "本月已排院次",
-        "本月差旅天数",
-        "连续工作天数",
-        "上次结束城市(可空)",
-        "上次结束日期(YYYY-MM-DD)(必填)",
+        "姓名", "性别(男/女)", "等级(A/B/C)", "可带队(是/否)", "常驻城市", "每周上限(院次)",
+        "状态(在岗/请假/冻结)", "本月已排院次", "本月差旅天数", "连续工作天数",
+        "上次结束城市(可空)", "上次结束日期(YYYY-MM-DD)(必填)",
     ]
     explain_a = ["必填", "默认女", "默认B", "默认是", "必填", "默认1", "默认在岗", "默认0", "默认0", "默认0", "可空", "必填"]
     example_a = [
@@ -1702,17 +1620,8 @@ elif page == "模板导入":
     st.download_button("下载稽查员模板（XLSX）", bio_a.getvalue(), file_name="稽查员模板.xlsx", key="dl_aud_tpl")
 
     headers_t = [
-        "项目名称",
-        "客户/申办方",
-        "需要A带队(是/否)",
-        "所需人数",
-        "任务天数",
-        "性别要求(男/女/不限)",
-        "硬指定人员(可空)",
-        "软指定专家/老师(可空)",
-        "中心城市",
-        "开始日期(YYYY-MM-DD)",
-        "结束日期(YYYY-MM-DD)(必填)",
+        "项目名称", "客户/申办方", "需要A带队(是/否)", "所需人数", "任务天数", "性别要求(男/女/不限)",
+        "硬指定人员(可空)", "软指定专家/老师(可空)", "中心城市", "开始日期(YYYY-MM-DD)", "结束日期(YYYY-MM-DD)(必填)",
     ]
     explain_t = ["必填", "可空", "默认否", "默认1", "默认1", "默认不限", "可空", "可空", "必填", "必填", "必填"]
     example_t = [
@@ -1816,7 +1725,6 @@ elif page == "模板导入":
                     site_city = str(r[city_i] or "").strip()
                     start_d = safe_parse_date(r[sd_i])
                     end_d = safe_parse_date(r[ed_i])
-
                     if not project_name or not site_city or not start_d or not end_d:
                         continue
                     if end_d < start_d:
@@ -1863,8 +1771,6 @@ elif page == "模板导入":
             st.success(f"已导入 / 更新 {imported} 条任务记录。")
             st.rerun()
 
-
-# -------------------- 页面：日历视图 --------------------
 elif page == "日历视图":
     st.subheader("日历视图")
     st.caption("按月查看排班、节假日标识，并支持导出 ICS 日历。")
@@ -2015,8 +1921,6 @@ elif page == "日历视图":
             one_ics = build_ics_events(db, auditor_id=auditor_id)
             st.download_button("导出当前稽查员 ICS 日历", one_ics, file_name=f"wnrh_auditor_{auditor_id}.ics", key="dl_one_ics")
 
-
-# -------------------- 页面：账号管理 --------------------
 elif page == "账号管理":
     st.subheader("账号管理")
     current_user = st.session_state.get("login_user", "")
@@ -2144,8 +2048,6 @@ elif page == "账号管理":
                     else:
                         st.error(msg)
 
-
-# -------------------- 页面：数据清理 --------------------
 elif page == "数据清理":
     render_data_cleanup()
 
