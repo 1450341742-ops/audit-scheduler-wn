@@ -1,11 +1,7 @@
-# streamlit_app.py（根目录）——完全可覆盖版（Streamlit v1.55.0：上传按钮“浏览文件”必须显示 + 删除侧边栏“导航/数据状态”字样）
-# ✅ 修复点：
-# 1) safe_parse_date 支持 date/datetime/Timestamp/带时间字符串/Excel序列号（45231）等
-# 2) 保存时不再 str() 日期字段，直接传入 safe_parse_date
-# 3) 保存时增加 “结束 < 开始” 拦截，避免倒挂
-# 4) 保留：登录权限（管理员/主管理员/普通用户可见板块配置）、form+data_editor稳定提交、DB诊断（已按要求彻底隐藏侧边栏展示）
-# 5) ✅ 模板导入：上传区域英文全部中文化，并且“Browse files”按钮不丢失且显示为“浏览文件”
-# 6) ✅ 侧边栏：删除“数据库状态/数据状态/当前位置/功能导航”等字样（仅保留导航选项本身）
+# streamlit_app.py（根目录）——最终完全可覆盖版
+# ✅ Streamlit v1.55.0：模板导入上传区中文化 + “浏览文件”按钮不丢失且尺寸自适配（不再变成小方块）
+# ✅ 侧边栏：删除“数据状态/数据库状态/功能导航/当前位置”等字样（仅保留导航选项本身）
+# ✅ 日期保存：支持 Timestamp/带时间字符串/Excel序列号；避免保存后变回去；拦截结束<开始
 
 import csv
 import io
@@ -38,12 +34,15 @@ from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 APP_NAME = "万宁睿和稽查排班"
 st.set_page_config(page_title=APP_NAME, layout="wide")
 
-# -------------------- ✅ 全局样式：FileUploader 英文改中文（并保证按钮存在） --------------------
-# Streamlit v1.55.0：不要“全局隐藏 span/p”，否则会把按钮区域一并干掉
+# -------------------- ✅ 全局样式：FileUploader 英文改中文（并保证按钮尺寸不塌缩） --------------------
+# 关键修复：
+# - 不再用 font-size:0 让按钮基于文字宽度塌缩成小方块
+# - 改为：仅把原英文文本 opacity=0（保留布局宽度），再用 ::after 叠加“浏览文件”
+# - 强制给按钮 min-width/height/padding，使其在窄屏也合理
 st.markdown(
     """
     <style>
-    /* 1) 只隐藏 uploader 的英文说明区（不动按钮区） */
+    /* 1) 仅隐藏 uploader 的英文说明区（不影响按钮） */
     [data-testid="stFileUploaderDropzoneInstructions"] {
         display: none !important;
     }
@@ -56,47 +55,57 @@ st.markdown(
         padding: 10px 6px 8px 6px;
         line-height: 1.5;
         font-size: 14px;
+        white-space: normal;
     }
 
-    /* 3) 把按钮文字“Browse files”替换成“浏览文件”
-          说明：不同前端结构可能是 button 或 role=button 的 label/div，全部兜底 */
+    /* 3) 按钮：固定可读尺寸 + 不塌缩 */
     [data-testid="stFileUploaderDropzone"] button,
-    [data-testid="stFileUploaderDropzone"] [role="button"] {
+    [data-testid="stFileUploaderDropzone"] [role="button"]{
+        min-width: 120px !important;
+        height: 40px !important;
+        padding: 0 16px !important;
+        border-radius: 10px !important;
         position: relative !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        justify-content: center !important;
+        white-space: nowrap !important;
     }
 
-    /* 用 font-size:0 隐藏原英文（不隐藏按钮本体，避免按钮消失） */
-    [data-testid="stFileUploaderDropzone"] button {
-        font-size: 0 !important;
-    }
-    [data-testid="stFileUploaderDropzone"] button::after {
-        content: "浏览文件";
-        font-size: 14px;
-        font-weight: 600;
-        position: absolute;
-        inset: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        pointer-events: none;
-        color: inherit;
+    /* 4) 隐藏原英文，但保留其占位（关键：opacity=0 不影响宽度计算） */
+    [data-testid="stFileUploaderDropzone"] button * ,
+    [data-testid="stFileUploaderDropzone"] [role="button"] * {
+        opacity: 0 !important;
     }
 
-    /* 如果不是 button，而是 role=button 的 label/div */
-    [data-testid="stFileUploaderDropzone"] [role="button"] {
-        font-size: 0 !important;
-    }
+    /* 5) 叠加中文按钮文字 */
+    [data-testid="stFileUploaderDropzone"] button::after,
     [data-testid="stFileUploaderDropzone"] [role="button"]::after {
         content: "浏览文件";
-        font-size: 14px;
-        font-weight: 600;
+        opacity: 1 !important;
         position: absolute;
-        inset: 0;
+        left: 0; right: 0; top: 0; bottom: 0;
         display: flex;
         align-items: center;
         justify-content: center;
-        pointer-events: none;
+        font-size: 14px;
+        font-weight: 600;
+        pointer-events: none; /* 不影响点击 */
         color: inherit;
+        white-space: nowrap;
+    }
+
+    /* 6) 窄屏兜底：按钮也别挤成方块 */
+    @media (max-width: 520px) {
+        [data-testid="stFileUploaderDropzone"] button,
+        [data-testid="stFileUploaderDropzone"] [role="button"]{
+            min-width: 110px !important;
+            height: 38px !important;
+            padding: 0 12px !important;
+        }
+        [data-testid="stFileUploaderDropzone"]::before{
+            font-size: 13px;
+        }
     }
     </style>
     """,
@@ -117,17 +126,8 @@ def db_session():
         db.close()
 
 
-def parse_date(value: str) -> date:
-    return datetime.strptime(str(value).strip(), "%Y-%m-%d").date()
-
-
 def safe_parse_date(value) -> Optional[date]:
-    """
-    ✅ 更鲁棒的日期解析：
-    - 支持 date / datetime / pandas Timestamp
-    - 支持 'YYYY-MM-DD'、'YYYY-MM-DD HH:MM:SS'
-    - 支持 Excel 序列号（int/float/纯数字字符串，比如 45231 或 45231.0）
-    """
+    """鲁棒日期解析：date/datetime/Timestamp/带时间字符串/Excel序列号（45231）"""
     if value is None:
         return None
 
@@ -142,6 +142,7 @@ def safe_parse_date(value) -> Optional[date]:
     except Exception:
         pass
 
+    # Excel 序列号
     try:
         if isinstance(value, (int, float)) and not (isinstance(value, float) and pd.isna(value)):
             base = datetime(1899, 12, 30)
@@ -157,7 +158,6 @@ def safe_parse_date(value) -> Optional[date]:
     s = str(value).strip()
     if not s:
         return None
-
     if " " in s:
         s = s.split(" ")[0].strip()
     s = s.replace("/", "-")
@@ -172,7 +172,7 @@ def d2s(v: Optional[date]) -> str:
     return v.strftime("%Y-%m-%d") if v else ""
 
 
-def show_table(rows: list[dict], height: int = 380, key: str | None = None):
+def show_table(rows: list[dict], height: int = 380):
     if not rows:
         st.info("暂无数据")
         return
@@ -197,11 +197,8 @@ def safe_commit(db: Session, context: str = "") -> bool:
 
 def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_return):
     state = st.session_state.get(editor_key)
-
     if not isinstance(state, dict):
-        if isinstance(editor_return, pd.DataFrame):
-            return editor_return
-        return original_df
+        return editor_return if isinstance(editor_return, pd.DataFrame) else original_df
 
     df = original_df.copy()
 
@@ -211,11 +208,10 @@ def materialize_editor_df(original_df: pd.DataFrame, editor_key: str, editor_ret
             ridx = int(ridx)
         except Exception:
             continue
-        if ridx < 0 or ridx >= len(df):
-            continue
-        for col, val in (changes or {}).items():
-            if col in df.columns:
-                df.at[ridx, col] = val
+        if 0 <= ridx < len(df):
+            for col, val in (changes or {}).items():
+                if col in df.columns:
+                    df.at[ridx, col] = val
 
     deleted_rows = state.get("deleted_rows") or []
     if deleted_rows:
@@ -245,6 +241,7 @@ def _safe_int(x, default=None):
         return default
 
 
+# -------------------- seed --------------------
 def seed_city_distances_if_needed(db: Session):
     seen = set()
     for a, b, km in SEED_CITY_DISTANCES:
@@ -292,6 +289,7 @@ with db_session() as db:
     seed_cities_if_needed(db)
 
 
+# -------------------- 登录认证 + 权限（主管理员可配置普通用户可见板块） --------------------
 ALL_PAGES = [
     "智能排班",
     "批量排班",
@@ -304,7 +302,6 @@ ALL_PAGES = [
     "账号管理",
     "数据清理",
 ]
-
 DEFAULT_NORMAL_PAGES = ["任务管理", "稽查员管理", "日历视图"]
 
 
@@ -439,11 +436,7 @@ def _normalize_pages(pages: list[str]) -> list[str]:
     out = []
     for p in pages or []:
         p = str(p).strip()
-        if not p:
-            continue
-        if p not in ALL_PAGES:
-            continue
-        if p in seen:
+        if not p or p not in ALL_PAGES or p in seen:
             continue
         seen.add(p)
         out.append(p)
@@ -501,12 +494,10 @@ def create_auth_user(username: str, password: str, is_admin: bool = False, is_su
         return False, "密码至少6位"
     if get_auth_user(clean_user):
         return False, "该账号已存在"
-
     if is_super_admin:
         is_admin = True
 
     allowed = None if is_admin else json.dumps(DEFAULT_NORMAL_PAGES, ensure_ascii=False)
-
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -882,10 +873,6 @@ def render_data_cleanup():
 
 # -------------------- 侧边栏 --------------------
 st.sidebar.title(APP_NAME)
-
-# ✅ 按要求：删除“数据状态/数据库状态”等字样 => 不显示任何 DB 信息块
-# （如果你以后要恢复DB诊断，只需把该块加回即可）
-
 st.sidebar.caption(f"当前用户：{st.session_state.get('login_user', '')}")
 
 if st.sidebar.button("退出登录", key="logout_btn"):
@@ -902,7 +889,7 @@ allowed_pages = st.session_state.get("allowed_pages") or get_user_allowed_pages(
 allowed_pages = _normalize_pages(allowed_pages) if not is_admin else ALL_PAGES[:]
 st.session_state["allowed_pages"] = allowed_pages
 
-# ✅ 按要求：删除“功能导航”等字样
+# ✅ 删除“功能导航”等字样：label 为空且隐藏
 page = st.sidebar.radio(
     label="",
     options=allowed_pages,
@@ -910,7 +897,7 @@ page = st.sidebar.radio(
     label_visibility="collapsed",
 )
 
-# ✅ 右侧标题随左侧页面变更
+# ✅ 右侧标题随页面变更
 st.title(f"{APP_NAME}｜{page}")
 
 if (not is_admin) and (page not in allowed_pages):
