@@ -28,7 +28,7 @@ from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 
 APP_NAME = "万宁睿和稽查排班"
 st.set_page_config(page_title=APP_NAME, layout="wide")
-st.caption("当前数据库：云端 PostgreSQL（已连接）" if not IS_SQLITE else "当前数据库：本地 SQLite")
+st.caption(f"数据库类型：{'PostgreSQL' if not IS_SQLITE else 'SQLite'}")
 
 try:
     Base.metadata.create_all(bind=engine)
@@ -249,25 +249,27 @@ def normalize_text(v) -> str:
 
 
 def seed_city_distances_if_needed(db: Session):
+    # 云端数据库下，若已有数据，直接跳过，避免每次启动逐条查询导致卡顿
+    try:
+        if db.query(CityDistance).count() > 0:
+            return
+    except Exception:
+        return
+
     seen = set()
     for a, b, km in SEED_CITY_DISTANCES:
         a = str(a).strip()
         b = str(b).strip()
         if not a or not b or a == b:
             continue
+
         key = (a, b)
         if key in seen:
             continue
         seen.add(key)
-        exists = db.query(CityDistance).filter(CityDistance.from_city == a, CityDistance.to_city == b).first()
-        if exists:
-            continue
+
         db.add(CityDistance(from_city=a, to_city=b, km=float(km)))
-        try:
-            db.flush()
-        except IntegrityError:
-            db.rollback()
-            continue
+
     safe_commit(db, "初始化城市距离")
 
 
@@ -275,18 +277,18 @@ SEED_CITIES = [(name, latlon[0], latlon[1]) for name, latlon in CITY_COORDS.item
 
 
 def seed_cities_if_needed(db: Session):
-    if db.query(City).count() > 0:
+    try:
+        if db.query(City).count() > 0:
+            return
+    except Exception:
         return
+
     for name, lat, lon in SEED_CITIES:
         nm = str(name).strip()
         if not nm:
             continue
         db.add(City(name=nm, lat=float(lat), lon=float(lon)))
-        try:
-            db.flush()
-        except IntegrityError:
-            db.rollback()
-            continue
+
     safe_commit(db, "初始化城市坐标")
 
 
