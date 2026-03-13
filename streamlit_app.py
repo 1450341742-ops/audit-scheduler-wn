@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from app.db import Base, SessionLocal, engine, ensure_schema
+from app.db import Base, SessionLocal, engine, ensure_schema, IS_SQLITE, DB_URL
 from app.models import Auditor, Task, Schedule, CityDistance, City
 from app.scheduler import (
     build_candidates,
@@ -309,6 +309,9 @@ def hash_password(password: str) -> str:
 
 
 def ensure_auth_table():
+    """
+    兼容 sqlite / postgres 的 auth_users 初始化
+    """
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -325,13 +328,22 @@ def ensure_auth_table():
             )
         )
 
-    with engine.begin() as conn:
-        cols = conn.execute(text("PRAGMA table_info(auth_users)")).mappings().all()
-        existing = {str(c.get("name")) for c in cols}
-        if "is_super_admin" not in existing:
-            conn.execute(text("ALTER TABLE auth_users ADD COLUMN is_super_admin INTEGER NOT NULL DEFAULT 0"))
-        if "allowed_pages_json" not in existing:
-            conn.execute(text("ALTER TABLE auth_users ADD COLUMN allowed_pages_json TEXT"))
+    if IS_SQLITE:
+        with engine.begin() as conn:
+            cols = conn.execute(text("PRAGMA table_info(auth_users)")).mappings().all()
+            existing = {str(c.get("name")) for c in cols}
+            if "is_super_admin" not in existing:
+                conn.execute(text("ALTER TABLE auth_users ADD COLUMN is_super_admin INTEGER NOT NULL DEFAULT 0"))
+            if "allowed_pages_json" not in existing:
+                conn.execute(text("ALTER TABLE auth_users ADD COLUMN allowed_pages_json TEXT"))
+    else:
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS is_super_admin INTEGER NOT NULL DEFAULT 0")
+            )
+            conn.execute(
+                text("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS allowed_pages_json TEXT")
+            )
 
 
 def _bootstrap_seed_users() -> dict[str, str]:
@@ -982,6 +994,7 @@ page = st.sidebar.radio(
 )
 
 st.title(f"{APP_NAME}｜{page}")
+st.caption(f"当前数据库：{DB_URL}")
 
 if (not is_admin) and (page not in allowed_pages):
     st.error("当前账号无权限访问该板块，请联系主管理员开通。")
