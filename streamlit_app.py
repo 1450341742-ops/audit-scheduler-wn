@@ -1,3 +1,14 @@
+st.write("应用启动中...")
+
+from app.db import DB_URL
+st.write(f"DB_URL: {DB_URL}")
+
+st.write("准备建表...")
+Base.metadata.create_all(bind=engine)
+st.write("建表完成")
+
+ensure_schema()
+st.write("ensure_schema 完成")
 import csv
 import io
 import json
