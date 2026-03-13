@@ -28,7 +28,6 @@ from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 
 APP_NAME = "万宁睿和稽查排班"
 st.set_page_config(page_title=APP_NAME, layout="wide")
-st.caption(f"数据库类型：{'PostgreSQL' if not IS_SQLITE else 'SQLite'}")
 
 try:
     Base.metadata.create_all(bind=engine)
@@ -120,7 +119,6 @@ st.markdown(
 
 # -------------------- 初始化 --------------------
 
-
 @contextmanager
 def db_session():
     db = SessionLocal()
@@ -128,7 +126,6 @@ def db_session():
         yield db
     finally:
         db.close()
-
 
 def safe_parse_date(value) -> Optional[date]:
     if value is None:
@@ -182,17 +179,14 @@ def safe_parse_date(value) -> Optional[date]:
 
     return None
 
-
 def d2s(v: Optional[date]) -> str:
     return v.strftime("%Y-%m-%d") if v else ""
-
 
 def show_table(rows: list[dict], height: int = 380):
     if not rows:
         st.info("暂无数据")
         return
     st.dataframe(rows, use_container_width=True, height=height)
-
 
 def safe_commit(db: Session, context: str = "") -> bool:
     try:
@@ -209,7 +203,6 @@ def safe_commit(db: Session, context: str = "") -> bool:
         st.exception(e)
         return False
 
-
 def clear_runtime_caches_after_data_change():
     for k in [
         "recommend_result",
@@ -221,7 +214,6 @@ def clear_runtime_caches_after_data_change():
     ]:
         if k in st.session_state:
             st.session_state.pop(k, None)
-
 
 def _safe_int(x, default=None):
     try:
@@ -236,7 +228,6 @@ def _safe_int(x, default=None):
     except Exception:
         return default
 
-
 def normalize_text(v) -> str:
     if v is None:
         return ""
@@ -246,7 +237,6 @@ def normalize_text(v) -> str:
     except Exception:
         pass
     return str(v).strip()
-
 
 def seed_city_distances_if_needed(db: Session):
     # 云端数据库下，若已有数据，直接跳过，避免每次启动逐条查询导致卡顿
@@ -272,9 +262,7 @@ def seed_city_distances_if_needed(db: Session):
 
     safe_commit(db, "初始化城市距离")
 
-
 SEED_CITIES = [(name, latlon[0], latlon[1]) for name, latlon in CITY_COORDS.items()]
-
 
 def seed_cities_if_needed(db: Session):
     try:
@@ -290,7 +278,6 @@ def seed_cities_if_needed(db: Session):
         db.add(City(name=nm, lat=float(lat), lon=float(lon)))
 
     safe_commit(db, "初始化城市坐标")
-
 
 with db_session() as db:
     seed_city_distances_if_needed(db)
@@ -311,10 +298,8 @@ ALL_PAGES = [
 ]
 DEFAULT_NORMAL_PAGES = ["任务管理", "稽查员管理", "日历视图"]
 
-
 def hash_password(password: str) -> str:
     return hashlib.sha256(str(password).encode("utf-8")).hexdigest()
-
 
 def ensure_auth_table():
     """
@@ -353,7 +338,6 @@ def ensure_auth_table():
                 text("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS allowed_pages_json TEXT")
             )
 
-
 def _bootstrap_seed_users() -> dict[str, str]:
     users = {}
     try:
@@ -374,7 +358,6 @@ def _bootstrap_seed_users() -> dict[str, str]:
     if not users:
         users = {"admin": "admin123"}
     return users
-
 
 def bootstrap_auth_users_if_needed():
     ensure_auth_table()
@@ -415,7 +398,6 @@ def bootstrap_auth_users_if_needed():
                 },
             )
 
-
 def list_auth_users() -> list[dict]:
     ensure_auth_table()
     with engine.begin() as conn:
@@ -429,7 +411,6 @@ def list_auth_users() -> list[dict]:
             )
         ).mappings().all()
     return [dict(r) for r in rows]
-
 
 def get_auth_user(username: str) -> Optional[dict]:
     ensure_auth_table()
@@ -449,7 +430,6 @@ def get_auth_user(username: str) -> Optional[dict]:
         ).mappings().first()
     return dict(row) if row else None
 
-
 def _normalize_pages(pages: list[str]) -> list[str]:
     seen = set()
     out = []
@@ -464,7 +444,6 @@ def _normalize_pages(pages: list[str]) -> list[str]:
         seen.add(p)
         out.append(p)
     return out
-
 
 def get_user_allowed_pages(username: str) -> list[str]:
     u = get_auth_user(username)
@@ -481,7 +460,6 @@ def get_user_allowed_pages(username: str) -> list[str]:
     except Exception:
         pass
     return DEFAULT_NORMAL_PAGES[:]
-
 
 def set_user_allowed_pages(username: str, pages: list[str]) -> tuple[bool, str]:
     ensure_auth_table()
@@ -502,7 +480,6 @@ def set_user_allowed_pages(username: str, pages: list[str]) -> tuple[bool, str]:
             {"v": json.dumps(pages, ensure_ascii=False), "username": clean_user},
         )
     return True, "已保存可见板块"
-
 
 def create_auth_user(username: str, password: str, is_admin: bool = False, is_super_admin: bool = False) -> tuple[bool, str]:
     ensure_auth_table()
@@ -542,7 +519,6 @@ def create_auth_user(username: str, password: str, is_admin: bool = False, is_su
         )
     return True, "新增账号成功"
 
-
 def update_auth_password(username: str, new_password: str) -> tuple[bool, str]:
     ensure_auth_table()
     clean_user = str(username or "").strip()
@@ -559,7 +535,6 @@ def update_auth_password(username: str, new_password: str) -> tuple[bool, str]:
         )
     return True, "密码修改成功"
 
-
 def delete_auth_user(username: str, current_user: str) -> tuple[bool, str]:
     ensure_auth_table()
     clean_user = str(username or "").strip()
@@ -573,16 +548,13 @@ def delete_auth_user(username: str, current_user: str) -> tuple[bool, str]:
         conn.execute(text("DELETE FROM auth_users WHERE username = :username"), {"username": clean_user})
     return True, "账号已删除"
 
-
 def check_login(username: str, password: str) -> bool:
     user = get_auth_user(username)
     if not user:
         return False
     return str(user.get("password_hash")) == hash_password(str(password))
 
-
 bootstrap_auth_users_if_needed()
-
 
 def render_login():
     st.title(APP_NAME)
@@ -605,7 +577,6 @@ def render_login():
             st.error("账号或密码错误")
     st.stop()
 
-
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 if "is_admin" not in st.session_state:
@@ -622,10 +593,8 @@ STATUS_MAP = {"在岗": "active", "请假": "leave", "冻结": "frozen"}
 STATUS_MAP_REV = {v: k for k, v in STATUS_MAP.items()}
 BOOL_TRUE = {"是", "Y", "y", "yes", "YES", "True", "true", "1", "是/yes"}
 
-
 def ics_escape(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
-
 
 def build_ics_events(db: Session, auditor_id: int | None = None):
     q = db.query(Schedule).order_by(Schedule.id.desc())
@@ -669,7 +638,6 @@ def build_ics_events(db: Session, auditor_id: int | None = None):
         "END:VCALENDAR",
     ]
     return "\r\n".join(lines).encode("utf-8")
-
 
 def update_auditor_record(
     auditor_id: int,
@@ -719,7 +687,6 @@ def update_auditor_record(
 
         return safe_commit(db, f"更新稽查员#{auditor_id}")
 
-
 def delete_auditor_record(auditor_id: int):
     with db_session() as db:
         obj = db.query(Auditor).filter(Auditor.id == int(auditor_id)).first()
@@ -729,7 +696,6 @@ def delete_auditor_record(auditor_id: int):
         db.query(Schedule).filter(Schedule.auditor_id == int(auditor_id)).delete()
         db.delete(obj)
         return safe_commit(db, f"删除稽查员#{auditor_id}")
-
 
 def update_task_record(
     task_id: int,
@@ -799,7 +765,6 @@ def update_task_record(
 
         return safe_commit(db, f"更新任务#{task_id}")
 
-
 def delete_task_record(task_id: int):
     with db_session() as db:
         obj = db.query(Task).filter(Task.id == int(task_id)).first()
@@ -809,7 +774,6 @@ def delete_task_record(task_id: int):
         db.query(Schedule).filter(Schedule.task_id == int(task_id)).delete()
         db.delete(obj)
         return safe_commit(db, f"删除任务#{task_id}")
-
 
 def assign_team_to_task(db: Session, task: Task, leader_id: int, member_ids: list[int]):
     if db.query(Schedule).filter(Schedule.task_id == task.id).count() > 0:
@@ -865,7 +829,6 @@ def assign_team_to_task(db: Session, task: Task, leader_id: int, member_ids: lis
             add_schedule(int(mid), "member")
 
     return True, "ok"
-
 
 def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
     if d2 < d1:
@@ -961,7 +924,6 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
 
     return report
 
-
 def load_day_marks():
     try:
         p = Path(__file__).resolve().parent / "app" / "holidays_cn.json"
@@ -973,7 +935,6 @@ def load_day_marks():
     except Exception:
         pass
     return []
-
 
 # -------------------- 侧边栏 --------------------
 st.sidebar.title(APP_NAME)
@@ -1002,7 +963,6 @@ page = st.sidebar.radio(
 )
 
 st.title(f"{APP_NAME}｜{page}")
-st.caption(f"当前数据库：{DB_URL}")
 
 if (not is_admin) and (page not in allowed_pages):
     st.error("当前账号无权限访问该板块，请联系主管理员开通。")
