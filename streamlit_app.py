@@ -14,14 +14,7 @@ import streamlit as st
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
-
-st.write("应用启动中：导入基础库完成")
-
-from app.db import Base, SessionLocal, engine, ensure_schema, IS_SQLITE, DB_URL
-
-st.write("应用启动中：app.db 导入完成")
-st.write(f"当前数据库连接：{DB_URL}")
-st.write(f"当前是否 SQLite：{IS_SQLITE}")
+st.caption("当前数据库：云端 PostgreSQL（已连接）")
 
 from app.models import Auditor, Task, Schedule, CityDistance, City
 from app.scheduler import (
