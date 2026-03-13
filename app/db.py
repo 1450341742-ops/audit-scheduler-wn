@@ -60,8 +60,15 @@ engine_kwargs = {
 if IS_SQLITE:
     engine_kwargs["connect_args"] = {"check_same_thread": False}
 
-engine = create_engine(DB_URL, **engine_kwargs)
+if IS_SQLITE:
+    engine_kwargs["connect_args"] = {"check_same_thread": False}
+else:
+    engine_kwargs["connect_args"] = {
+        "connect_timeout": 10,
+        "sslmode": "require",
+    }
 
+engine = create_engine(DB_URL, **engine_kwargs)
 SessionLocal = sessionmaker(
     bind=engine,
     autocommit=False,
