@@ -28,6 +28,14 @@ from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 
 APP_NAME = "万宁睿和稽查排班"
 st.set_page_config(page_title=APP_NAME, layout="wide")
+st.caption("当前数据库：云端 PostgreSQL（已连接）" if not IS_SQLITE else "当前数据库：本地 SQLite")
+
+try:
+    Base.metadata.create_all(bind=engine)
+    ensure_schema()
+except Exception as e:
+    st.error(f"数据库初始化失败：{e}")
+    st.stop()
 
 # -------------------- 上传控件中文化 --------------------
 st.markdown(
@@ -111,8 +119,6 @@ st.markdown(
 )
 
 # -------------------- 初始化 --------------------
-Base.metadata.create_all(bind=engine)
-ensure_schema()
 
 
 @contextmanager
