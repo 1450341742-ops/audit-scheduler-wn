@@ -25,12 +25,6 @@ from app.scheduler import (
     team_objective,
 )
 from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
-from app.db import test_db_connection
-
-ok, msg = test_db_connection()
-if not ok:
-    st.error(f"数据库连接失败：{msg}")
-    st.stop()
 
 Base.metadata.create_all(bind=engine)
 ensure_schema()
