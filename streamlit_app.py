@@ -14,8 +14,8 @@ import streamlit as st
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
-st.caption("当前数据库：云端 PostgreSQL（已连接）")
 
+from app.db import Base, SessionLocal, engine, ensure_schema, IS_SQLITE, DB_URL
 from app.models import Auditor, Task, Schedule, CityDistance, City
 from app.scheduler import (
     build_candidates,
@@ -26,16 +26,12 @@ from app.scheduler import (
 )
 from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 
-st.write("应用启动中：models / scheduler 导入完成")
-
 APP_NAME = "万宁睿和稽查排班"
 st.set_page_config(page_title=APP_NAME, layout="wide")
 
-st.write("准备执行 Base.metadata.create_all ...")
-Base.metadata.create_all(bind=engine)
-st.write("Base.metadata.create_all 执行完成")
+st.caption(f"当前数据库：{'云端 PostgreSQL（已连接）' if not IS_SQLITE else '本地 SQLite'}")
 
-st.write("准备执行 ensure_schema ...")
+Base.metadata.create_all(bind=engine)
 ensure_schema()
 st.write("ensure_schema 执行完成")
 
