@@ -5,26 +5,29 @@ import sys
 import sqlite3
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 
+
 # =========================================================
-# ✅ 关键修复：数据库路径唯一化（彻底解决“保存后不生效/刷新又变回去”）
-# 之前的问题：sqlite:///./audit_scheduler.db 依赖当前工作目录，导致写A读B
+# 数据库连接规则（优先级从高到低）
+# 1) DATABASE_URL：云端 Supabase / Postgres
+# 2) AUDIT_SCHEDULER_DB：本地手动指定 sqlite 文件
+# 3) exe 运行：用户目录 ~/WNRH_AuditScheduler/audit_scheduler.db
+# 4) 源码本地运行：项目根目录 ./data/audit_scheduler.db
 #
-# 现在规则（优先级从高到低）：
-# 1) 环境变量 AUDIT_SCHEDULER_DB 指定（绝对/相对都行）
-# 2) 若是打包 exe（sys.frozen=True）：固定到用户目录 ~/WNRH_AuditScheduler/
-# 3) 否则源码运行：固定到项目根目录 ./data/
+# 说明：
+# - Streamlit Cloud / 云端正式环境：请务必配置 DATABASE_URL
+# - 本地开发：不配 DATABASE_URL 也可自动回退 sqlite
 # =========================================================
 
+
 def _project_root() -> Path:
-    # app/db.py 在 app/ 下，项目根目录是上一级
     return Path(__file__).resolve().parent.parent
 
 
-def _resolve_db_file() -> Path:
-    # 1) 手动指定（可选）
+def _resolve_local_db_file() -> Path:
+    # 1) 手动指定 sqlite 文件
     env = os.environ.get("AUDIT_SCHEDULER_DB", "").strip()
     if env:
         p = Path(env).expanduser()
@@ -33,29 +36,61 @@ def _resolve_db_file() -> Path:
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
-    # 2) 打包 exe：不要放 exe 目录（可能无写权限/临时目录）
+    # 2) 打包 exe：固定到用户目录
     if getattr(sys, "frozen", False):
         base = Path.home() / "WNRH_AuditScheduler"
         base.mkdir(parents=True, exist_ok=True)
         return base / "audit_scheduler.db"
 
-    # 3) 源码运行：固定到项目根目录 data/
+    # 3) 本地源码运行：固定到项目根目录 data/
     base = _project_root() / "data"
     base.mkdir(parents=True, exist_ok=True)
     return base / "audit_scheduler.db"
 
 
-DB_FILE = _resolve_db_file()
-DB_URL = f"sqlite:///{str(DB_FILE).replace('\\', '/')}"
+def _normalize_database_url(url: str) -> str:
+    """
+    兼容一些平台给出的 postgres:// 前缀
+    SQLAlchemy 推荐使用 postgresql://
+    """
+    url = (url or "").strip()
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql://", 1)
+    return url
 
 
-engine = create_engine(
-    DB_URL,
-    connect_args={"check_same_thread": False},
-    pool_pre_ping=True,
-)
+def _resolve_database_config() -> tuple[str, Path | None, bool]:
+    """
+    返回:
+    - DB_URL: str
+    - DB_FILE: Path | None
+    - IS_SQLITE: bool
+    """
+    # 云端正式环境优先使用外部数据库
+    database_url = _normalize_database_url(os.environ.get("DATABASE_URL", ""))
 
-SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    if database_url:
+        return database_url, None, False
+
+    # 回退到本地 sqlite（仅适合本地开发/测试）
+    db_file = _resolve_local_db_file()
+    db_url = f"sqlite:///{str(db_file).replace('\\', '/')}"
+    return db_url, db_file, True
+
+
+DB_URL, DB_FILE, IS_SQLITE = _resolve_database_config()
+
+engine_kwargs = {
+    "pool_pre_ping": True,
+    "future": True,
+}
+
+if IS_SQLITE:
+    engine_kwargs["connect_args"] = {"check_same_thread": False}
+
+engine = create_engine(DB_URL, **engine_kwargs)
+
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, future=True)
 
 
 class Base(DeclarativeBase):
@@ -71,14 +106,21 @@ def get_db():
 
 
 def ensure_schema():
-    """SQLite 轻量迁移：为已有数据库补齐缺失字段（避免升级后录入/查询异常）。
-    ✅ 注意：必须使用 DB_FILE（唯一绝对路径），不能用 os.getcwd()。
     """
-    db_file = DB_FILE
-    if not db_file.exists():
+    说明：
+    1) PostgreSQL（Supabase）：
+       - 由 Base.metadata.create_all(bind=engine) 负责建表
+       - 此函数不做 sqlite 风格的 ALTER TABLE 轻量迁移
+    2) SQLite：
+       - 对旧库补齐缺失字段，兼容历史版本
+    """
+    if not IS_SQLITE:
         return
 
-    conn = sqlite3.connect(str(db_file))
+    if DB_FILE is None or not DB_FILE.exists():
+        return
+
+    conn = sqlite3.connect(str(DB_FILE))
     cur = conn.cursor()
 
     def table_exists(name: str) -> bool:
@@ -132,3 +174,15 @@ def ensure_schema():
         conn.commit()
     finally:
         conn.close()
+
+
+def test_db_connection() -> tuple[bool, str]:
+    """
+    可选：用于页面诊断数据库连接是否正常
+    """
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True, f"数据库连接正常：{DB_URL}"
+    except Exception as e:
+        return False, f"数据库连接失败：{e}"
