@@ -186,3 +186,11 @@ def test_db_connection() -> tuple[bool, str]:
         return True, f"数据库连接正常：{DB_URL}"
     except Exception as e:
         return False, f"数据库连接失败：{e}"
+    def test_db_connection():
+    from sqlalchemy import text
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True, "数据库连接成功"
+    except Exception as e:
+        return False, str(e)
