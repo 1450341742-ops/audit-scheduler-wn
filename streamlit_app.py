@@ -29,28 +29,6 @@ from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 APP_NAME = "万宁睿和稽查排班"
 st.set_page_config(page_title=APP_NAME, layout="wide")
 
-st.caption(f"当前数据库：{'云端 PostgreSQL（已连接）' if not IS_SQLITE else '本地 SQLite'}")
-
-Base.metadata.create_all(bind=engine)
-ensure_schema()
-st.write("ensure_schema 执行完成")
-
-from app.db import Base, SessionLocal, engine, ensure_schema, IS_SQLITE, DB_URL
-from app.models import Auditor, Task, Schedule, CityDistance, City
-from app.scheduler import (
-    build_candidates,
-    propose_team,
-    compute_from_city,
-    get_distance_km,
-    team_objective,
-)
-from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
-
-Base.metadata.create_all(bind=engine)
-ensure_schema()
-APP_NAME = "万宁睿和稽查排班"
-st.set_page_config(page_title=APP_NAME, layout="wide")
-
 # -------------------- 上传控件中文化 --------------------
 st.markdown(
     """
