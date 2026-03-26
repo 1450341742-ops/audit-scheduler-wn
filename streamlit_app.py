@@ -4,13 +4,10 @@ import json
 import os
 import re
 import hashlib
-import smtplib
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 import pandas as pd
 import streamlit as st
@@ -18,7 +15,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from app.db import Base, SessionLocal, engine, ensure_schema, IS_SQLITE
+from app.db import Base, SessionLocal, engine, ensure_schema, IS_SQLITE, IS_SQLITE, DB_URL
 from app.models import Auditor, Task, Schedule, CityDistance, City
 from app.scheduler import (
     build_candidates,
@@ -31,6 +28,13 @@ from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 
 APP_NAME = "万宁睿和稽查排班"
 st.set_page_config(page_title=APP_NAME, layout="wide")
+
+try:
+    Base.metadata.create_all(bind=engine)
+    ensure_schema()
+except Exception as e:
+    st.error(f"数据库初始化失败：{e}")
+    st.stop()
 
 # -------------------- 上传控件中文化 --------------------
 st.markdown(
@@ -114,9 +118,6 @@ st.markdown(
 )
 
 # -------------------- 初始化 --------------------
-Base.metadata.create_all(bind=engine)
-ensure_schema()
-
 
 @contextmanager
 def db_session():
@@ -125,7 +126,6 @@ def db_session():
         yield db
     finally:
         db.close()
-
 
 def safe_parse_date(value) -> Optional[date]:
     if value is None:
@@ -179,17 +179,14 @@ def safe_parse_date(value) -> Optional[date]:
 
     return None
 
-
 def d2s(v: Optional[date]) -> str:
     return v.strftime("%Y-%m-%d") if v else ""
-
 
 def show_table(rows: list[dict], height: int = 380):
     if not rows:
         st.info("暂无数据")
         return
     st.dataframe(rows, use_container_width=True, height=height)
-
 
 def safe_commit(db: Session, context: str = "") -> bool:
     try:
@@ -206,7 +203,6 @@ def safe_commit(db: Session, context: str = "") -> bool:
         st.exception(e)
         return False
 
-
 def clear_runtime_caches_after_data_change():
     for k in [
         "recommend_result",
@@ -218,7 +214,6 @@ def clear_runtime_caches_after_data_change():
     ]:
         if k in st.session_state:
             st.session_state.pop(k, None)
-
 
 def _safe_int(x, default=None):
     try:
@@ -233,7 +228,6 @@ def _safe_int(x, default=None):
     except Exception:
         return default
 
-
 def normalize_text(v) -> str:
     if v is None:
         return ""
@@ -244,48 +238,46 @@ def normalize_text(v) -> str:
         pass
     return str(v).strip()
 
-
 def seed_city_distances_if_needed(db: Session):
+    # 云端数据库下，若已有数据，直接跳过，避免每次启动逐条查询导致卡顿
+    try:
+        if db.query(CityDistance).count() > 0:
+            return
+    except Exception:
+        return
+
     seen = set()
     for a, b, km in SEED_CITY_DISTANCES:
         a = str(a).strip()
         b = str(b).strip()
         if not a or not b or a == b:
             continue
+
         key = (a, b)
         if key in seen:
             continue
         seen.add(key)
-        exists = db.query(CityDistance).filter(CityDistance.from_city == a, CityDistance.to_city == b).first()
-        if exists:
-            continue
-        db.add(CityDistance(from_city=a, to_city=b, km=float(km)))
-        try:
-            db.flush()
-        except IntegrityError:
-            db.rollback()
-            continue
-    safe_commit(db, "初始化城市距离")
 
+        db.add(CityDistance(from_city=a, to_city=b, km=float(km)))
+
+    safe_commit(db, "初始化城市距离")
 
 SEED_CITIES = [(name, latlon[0], latlon[1]) for name, latlon in CITY_COORDS.items()]
 
-
 def seed_cities_if_needed(db: Session):
-    if db.query(City).count() > 0:
+    try:
+        if db.query(City).count() > 0:
+            return
+    except Exception:
         return
+
     for name, lat, lon in SEED_CITIES:
         nm = str(name).strip()
         if not nm:
             continue
         db.add(City(name=nm, lat=float(lat), lon=float(lon)))
-        try:
-            db.flush()
-        except IntegrityError:
-            db.rollback()
-            continue
-    safe_commit(db, "初始化城市坐标")
 
+    safe_commit(db, "初始化城市坐标")
 
 with db_session() as db:
     seed_city_distances_if_needed(db)
@@ -306,12 +298,13 @@ ALL_PAGES = [
 ]
 DEFAULT_NORMAL_PAGES = ["任务管理", "稽查员管理", "日历视图"]
 
-
 def hash_password(password: str) -> str:
     return hashlib.sha256(str(password).encode("utf-8")).hexdigest()
 
-
 def ensure_auth_table():
+    """
+    兼容 sqlite / postgres 的 auth_users 初始化
+    """
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -322,7 +315,6 @@ def ensure_auth_table():
                     is_admin INTEGER NOT NULL DEFAULT 0,
                     is_super_admin INTEGER NOT NULL DEFAULT 0,
                     allowed_pages_json TEXT,
-                    email TEXT,
                     created_at TEXT
                 )
                 """
@@ -337,14 +329,14 @@ def ensure_auth_table():
                 conn.execute(text("ALTER TABLE auth_users ADD COLUMN is_super_admin INTEGER NOT NULL DEFAULT 0"))
             if "allowed_pages_json" not in existing:
                 conn.execute(text("ALTER TABLE auth_users ADD COLUMN allowed_pages_json TEXT"))
-            if "email" not in existing:
-                conn.execute(text("ALTER TABLE auth_users ADD COLUMN email TEXT"))
     else:
         with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS is_super_admin INTEGER NOT NULL DEFAULT 0"))
-            conn.execute(text("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS allowed_pages_json TEXT"))
-            conn.execute(text("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS email TEXT"))
-
+            conn.execute(
+                text("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS is_super_admin INTEGER NOT NULL DEFAULT 0")
+            )
+            conn.execute(
+                text("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS allowed_pages_json TEXT")
+            )
 
 def _bootstrap_seed_users() -> dict[str, str]:
     users = {}
@@ -366,7 +358,6 @@ def _bootstrap_seed_users() -> dict[str, str]:
     if not users:
         users = {"admin": "admin123"}
     return users
-
 
 def bootstrap_auth_users_if_needed():
     ensure_auth_table()
@@ -407,21 +398,19 @@ def bootstrap_auth_users_if_needed():
                 },
             )
 
-
 def list_auth_users() -> list[dict]:
     ensure_auth_table()
     with engine.begin() as conn:
         rows = conn.execute(
             text(
                 """
-                SELECT username, is_admin, is_super_admin, allowed_pages_json, email, created_at
+                SELECT username, is_admin, is_super_admin, allowed_pages_json, created_at
                 FROM auth_users
                 ORDER BY is_super_admin DESC, is_admin DESC, username ASC
                 """
             )
         ).mappings().all()
     return [dict(r) for r in rows]
-
 
 def get_auth_user(username: str) -> Optional[dict]:
     ensure_auth_table()
@@ -432,7 +421,7 @@ def get_auth_user(username: str) -> Optional[dict]:
         row = conn.execute(
             text(
                 """
-                SELECT username, password_hash, is_admin, is_super_admin, allowed_pages_json, email, created_at
+                SELECT username, password_hash, is_admin, is_super_admin, allowed_pages_json, created_at
                 FROM auth_users
                 WHERE username = :username
                 """
@@ -440,7 +429,6 @@ def get_auth_user(username: str) -> Optional[dict]:
             {"username": clean_user},
         ).mappings().first()
     return dict(row) if row else None
-
 
 def _normalize_pages(pages: list[str]) -> list[str]:
     seen = set()
@@ -457,7 +445,6 @@ def _normalize_pages(pages: list[str]) -> list[str]:
         out.append(p)
     return out
 
-
 def get_user_allowed_pages(username: str) -> list[str]:
     u = get_auth_user(username)
     if not u:
@@ -473,7 +460,6 @@ def get_user_allowed_pages(username: str) -> list[str]:
     except Exception:
         pass
     return DEFAULT_NORMAL_PAGES[:]
-
 
 def set_user_allowed_pages(username: str, pages: list[str]) -> tuple[bool, str]:
     ensure_auth_table()
@@ -495,8 +481,7 @@ def set_user_allowed_pages(username: str, pages: list[str]) -> tuple[bool, str]:
         )
     return True, "已保存可见板块"
 
-
-def create_auth_user(username: str, password: str, is_admin: bool = False, is_super_admin: bool = False, email: str = "") -> tuple[bool, str]:
+def create_auth_user(username: str, password: str, is_admin: bool = False, is_super_admin: bool = False) -> tuple[bool, str]:
     ensure_auth_table()
     clean_user = str(username or "").strip()
     if not clean_user:
@@ -519,8 +504,8 @@ def create_auth_user(username: str, password: str, is_admin: bool = False, is_su
         conn.execute(
             text(
                 """
-                INSERT INTO auth_users (username, password_hash, is_admin, is_super_admin, allowed_pages_json, email, created_at)
-                VALUES (:username, :password_hash, :is_admin, :is_super_admin, :allowed_pages_json, :email, :created_at)
+                INSERT INTO auth_users (username, password_hash, is_admin, is_super_admin, allowed_pages_json, created_at)
+                VALUES (:username, :password_hash, :is_admin, :is_super_admin, :allowed_pages_json, :created_at)
                 """
             ),
             {
@@ -529,12 +514,10 @@ def create_auth_user(username: str, password: str, is_admin: bool = False, is_su
                 "is_admin": 1 if is_admin else 0,
                 "is_super_admin": 1 if is_super_admin else 0,
                 "allowed_pages_json": allowed,
-                "email": normalize_text(email) or None,
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
         )
     return True, "新增账号成功"
-
 
 def update_auth_password(username: str, new_password: str) -> tuple[bool, str]:
     ensure_auth_table()
@@ -552,154 +535,6 @@ def update_auth_password(username: str, new_password: str) -> tuple[bool, str]:
         )
     return True, "密码修改成功"
 
-
-
-
-def set_user_email(username: str, email: str) -> tuple[bool, str]:
-    ensure_auth_table()
-    clean_user = str(username or "").strip()
-    if not clean_user:
-        return False, "账号不能为空"
-    email = normalize_text(email)
-    if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
-        return False, "邮箱格式不正确"
-    if not get_auth_user(clean_user):
-        return False, "账号不存在"
-    with engine.begin() as conn:
-        conn.execute(
-            text("UPDATE auth_users SET email = :email WHERE username = :username"),
-            {"username": clean_user, "email": email or None},
-        )
-    return True, "邮箱绑定已保存"
-
-
-def get_user_email(username: str) -> str:
-    u = get_auth_user(username)
-    return str(u.get("email") or "").strip() if u else ""
-
-
-def update_schedule_record(
-    schedule_id: int,
-    role: str,
-    start_date_value,
-    end_date_value,
-    travel_from_city: str,
-    travel_to_city: str,
-    distance_km,
-) -> tuple[bool, str]:
-    with db_session() as db:
-        obj = db.query(Schedule).filter(Schedule.id == int(schedule_id)).first()
-        if not obj:
-            return False, "未找到对应排班记录"
-
-        sd = safe_parse_date(start_date_value)
-        ed = safe_parse_date(end_date_value)
-        if sd is None or ed is None:
-            return False, "开始或结束日期无效"
-        if ed < sd:
-            return False, "结束日期不能早于开始日期"
-
-        obj.role = normalize_text(role) or obj.role
-        obj.start_date = sd
-        obj.end_date = ed
-        obj.travel_from_city = normalize_text(travel_from_city)
-        obj.travel_to_city = normalize_text(travel_to_city)
-        try:
-            obj.distance_km = float(distance_km or 0)
-        except Exception:
-            obj.distance_km = 0.0
-
-        ok = safe_commit(db, f"更新排班#{schedule_id}")
-        return (True, "排班明细已更新") if ok else (False, "排班更新失败")
-
-
-def delete_schedule_record(schedule_id: int) -> tuple[bool, str]:
-    with db_session() as db:
-        obj = db.query(Schedule).filter(Schedule.id == int(schedule_id)).first()
-        if not obj:
-            return False, "未找到对应排班记录"
-        db.delete(obj)
-        ok = safe_commit(db, f"删除排班#{schedule_id}")
-        return (True, "排班记录已删除") if ok else (False, "删除失败")
-
-
-def _schedule_rows_for_email(db: Session, auditor_id: int | None = None, start_date: date | None = None, end_date: date | None = None, latest_only: bool = False):
-    q = (
-        db.query(Schedule)
-        .options(joinedload(Schedule.task), joinedload(Schedule.auditor))
-        .order_by(Schedule.id.desc())
-    )
-    if auditor_id:
-        q = q.filter(Schedule.auditor_id == auditor_id)
-    rows = []
-    for s in q.all():
-        if start_date and s.end_date < start_date:
-            continue
-        if end_date and s.start_date > end_date:
-            continue
-        rows.append({
-            "排班ID": s.id,
-            "任务ID": s.task_id,
-            "项目": s.task.project_name if s.task else "",
-            "城市": s.task.site_city if s.task else "",
-            "稽查员": s.auditor.name if s.auditor else "",
-            "角色": "组长" if s.role == "leader" else "成员",
-            "开始日期": d2s(s.start_date),
-            "结束日期": d2s(s.end_date),
-            "路线": f"{s.travel_from_city} → {s.travel_to_city}",
-            "距离(km)": round(float(s.distance_km or 0), 1),
-        })
-    if latest_only:
-        return rows[:10]
-    return rows
-
-
-def _rows_to_email_text(title: str, rows: list[dict]) -> str:
-    if not rows:
-        return f"{title}\n\n暂无排班数据。"
-    lines = [title, ""]
-    for i, r in enumerate(rows, start=1):
-        lines.extend([
-            f"{i}. 排班ID：{r['排班ID']} / 任务ID：{r['任务ID']}",
-            f"   项目：{r['项目']}  城市：{r['城市']}",
-            f"   稽查员：{r['稽查员']}  角色：{r['角色']}",
-            f"   时间：{r['开始日期']} ~ {r['结束日期']}",
-            f"   路线：{r['路线']}  距离：{r['距离(km)']} km",
-            "",
-        ])
-    return "\n".join(lines)
-
-
-def send_schedule_email(to_email: str, subject: str, body: str) -> tuple[bool, str]:
-    host = str(st.secrets.get("SMTP_HOST", "")).strip()
-    port = int(str(st.secrets.get("SMTP_PORT", "465")).strip() or 465)
-    user = str(st.secrets.get("SMTP_USER", "")).strip()
-    password = str(st.secrets.get("SMTP_PASSWORD", "")).strip()
-    sender = str(st.secrets.get("SMTP_SENDER", user)).strip()
-    use_ssl = str(st.secrets.get("SMTP_USE_SSL", "true")).strip().lower() in ("1", "true", "yes", "y")
-
-    if not host or not user or not password or not sender:
-        return False, "未配置SMTP参数，请在Streamlit Secrets中配置 SMTP_HOST / SMTP_PORT / SMTP_USER / SMTP_PASSWORD / SMTP_SENDER"
-
-    try:
-        msg = MIMEMultipart()
-        msg["From"] = sender
-        msg["To"] = to_email
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body, "plain", "utf-8"))
-
-        if use_ssl:
-            server = smtplib.SMTP_SSL(host, port, timeout=20)
-        else:
-            server = smtplib.SMTP(host, port, timeout=20)
-            server.starttls()
-        server.login(user, password)
-        server.sendmail(sender, [to_email], msg.as_string())
-        server.quit()
-        return True, "邮件发送成功"
-    except Exception as e:
-        return False, f"邮件发送失败：{e}"
-
 def delete_auth_user(username: str, current_user: str) -> tuple[bool, str]:
     ensure_auth_table()
     clean_user = str(username or "").strip()
@@ -713,16 +548,13 @@ def delete_auth_user(username: str, current_user: str) -> tuple[bool, str]:
         conn.execute(text("DELETE FROM auth_users WHERE username = :username"), {"username": clean_user})
     return True, "账号已删除"
 
-
 def check_login(username: str, password: str) -> bool:
     user = get_auth_user(username)
     if not user:
         return False
     return str(user.get("password_hash")) == hash_password(str(password))
 
-
 bootstrap_auth_users_if_needed()
-
 
 def render_login():
     st.title(APP_NAME)
@@ -745,7 +577,6 @@ def render_login():
             st.error("账号或密码错误")
     st.stop()
 
-
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
 if "is_admin" not in st.session_state:
@@ -762,10 +593,8 @@ STATUS_MAP = {"在岗": "active", "请假": "leave", "冻结": "frozen"}
 STATUS_MAP_REV = {v: k for k, v in STATUS_MAP.items()}
 BOOL_TRUE = {"是", "Y", "y", "yes", "YES", "True", "true", "1", "是/yes"}
 
-
 def ics_escape(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
-
 
 def build_ics_events(db: Session, auditor_id: int | None = None):
     q = db.query(Schedule).order_by(Schedule.id.desc())
@@ -809,7 +638,6 @@ def build_ics_events(db: Session, auditor_id: int | None = None):
         "END:VCALENDAR",
     ]
     return "\r\n".join(lines).encode("utf-8")
-
 
 def update_auditor_record(
     auditor_id: int,
@@ -859,7 +687,6 @@ def update_auditor_record(
 
         return safe_commit(db, f"更新稽查员#{auditor_id}")
 
-
 def delete_auditor_record(auditor_id: int):
     with db_session() as db:
         obj = db.query(Auditor).filter(Auditor.id == int(auditor_id)).first()
@@ -869,7 +696,6 @@ def delete_auditor_record(auditor_id: int):
         db.query(Schedule).filter(Schedule.auditor_id == int(auditor_id)).delete()
         db.delete(obj)
         return safe_commit(db, f"删除稽查员#{auditor_id}")
-
 
 def update_task_record(
     task_id: int,
@@ -939,7 +765,6 @@ def update_task_record(
 
         return safe_commit(db, f"更新任务#{task_id}")
 
-
 def delete_task_record(task_id: int):
     with db_session() as db:
         obj = db.query(Task).filter(Task.id == int(task_id)).first()
@@ -949,7 +774,6 @@ def delete_task_record(task_id: int):
         db.query(Schedule).filter(Schedule.task_id == int(task_id)).delete()
         db.delete(obj)
         return safe_commit(db, f"删除任务#{task_id}")
-
 
 def assign_team_to_task(db: Session, task: Task, leader_id: int, member_ids: list[int]):
     if db.query(Schedule).filter(Schedule.task_id == task.id).count() > 0:
@@ -1005,7 +829,6 @@ def assign_team_to_task(db: Session, task: Task, leader_id: int, member_ids: lis
             add_schedule(int(mid), "member")
 
     return True, "ok"
-
 
 def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
     if d2 < d1:
@@ -1101,7 +924,6 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
 
     return report
 
-
 def load_day_marks():
     try:
         p = Path(__file__).resolve().parent / "app" / "holidays_cn.json"
@@ -1113,7 +935,6 @@ def load_day_marks():
     except Exception:
         pass
     return []
-
 
 # -------------------- 侧边栏 --------------------
 st.sidebar.title(APP_NAME)
@@ -2041,7 +1862,7 @@ elif page == "日历视图":
                 if s.get("start_date") <= day <= s.get("end_date"):
                     proj = s.get("project_name") or f"任务#{s.get('task_id')}"
                     person = s.get("auditor_name") or f"稽查员#{s.get('auditor_id')}"
-                    ev = f"#{s.get('task_id')} {proj}｜{person}"
+                    ev = f"{proj}｜{person}"
                     if ev in seen_e:
                         continue
                     seen_e.add(ev)
@@ -2098,107 +1919,6 @@ elif page == "日历视图":
             key="export_month_excel",
         )
 
-    st.divider()
-    st.subheader("修改排班明细")
-    if rows:
-        schedule_map = {f"#{r['ID']}｜{r['项目']}｜{r['稽查员']}｜{r['开始日期']}": r for r in rows}
-        selected_schedule_label = st.selectbox("选择排班记录", list(schedule_map.keys()), key="calendar_schedule_select")
-        selected_schedule = schedule_map[selected_schedule_label]
-        with st.form("calendar_schedule_edit_form", clear_on_submit=False):
-            c1, c2, c3 = st.columns(3)
-            edit_role = c1.selectbox("角色", ["leader", "member"], index=0 if selected_schedule["角色"] == "组长" else 1)
-            edit_start = c2.date_input("开始日期", value=safe_parse_date(selected_schedule["开始日期"]) or date.today(), key="cal_edit_start")
-            edit_end = c3.date_input("结束日期", value=safe_parse_date(selected_schedule["结束日期"]) or date.today(), key="cal_edit_end")
-            c4, c5, c6 = st.columns(3)
-            route_parts = str(selected_schedule["路线"]).split("→")
-            default_from = route_parts[0].strip() if route_parts else ""
-            default_to = route_parts[1].strip() if len(route_parts) > 1 else ""
-            edit_from = c4.text_input("出发地", value=default_from)
-            edit_to = c5.text_input("到达地", value=default_to)
-            edit_km = c6.number_input("距离(km)", min_value=0.0, value=float(selected_schedule["距离(km)"] or 0), step=1.0)
-            b1, b2 = st.columns(2)
-            save_schedule = b1.form_submit_button("保存排班明细", type="primary")
-            delete_schedule = b2.form_submit_button("删除排班记录")
-        if save_schedule:
-            ok, msg = update_schedule_record(
-                schedule_id=int(selected_schedule["ID"]),
-                role=edit_role,
-                start_date_value=edit_start,
-                end_date_value=edit_end,
-                travel_from_city=edit_from,
-                travel_to_city=edit_to,
-                distance_km=edit_km,
-            )
-            if ok:
-                clear_runtime_caches_after_data_change()
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
-        if delete_schedule:
-            ok, msg = delete_schedule_record(int(selected_schedule["ID"]))
-            if ok:
-                clear_runtime_caches_after_data_change()
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
-
-    st.divider()
-    st.subheader("邮件发送排班通知")
-    current_email = get_user_email(current_user)
-    if not current_email:
-        st.warning("当前账号未绑定邮箱。请先到【账号管理】中绑定邮箱。")
-    else:
-        notify_type = st.selectbox(
-            "通知内容",
-            [
-                "本稽查员的近期排班记录（自定义时间区间）",
-                "本稽查员的最新排班更新数据",
-                "公司本月所有排班数据",
-                "公司下个月所有排班数据",
-            ],
-            key="notify_type_select",
-        )
-        c1, c2 = st.columns(2)
-        notify_start = c1.date_input("开始日期", value=month_start, key="notify_start")
-        notify_end = c2.date_input("结束日期", value=month_end, key="notify_end")
-        if st.button("发送排班邮件", type="primary", key="send_schedule_email_btn"):
-            with db_session() as db:
-                if notify_type == "本稽查员的近期排班记录（自定义时间区间）":
-                    rows_email = _schedule_rows_for_email(db, auditor_id=auditor_id if auditor_id else None, start_date=notify_start, end_date=notify_end)
-                    if not auditor_id:
-                        st.error("请先在上方选择具体稽查员后再发送该通知。")
-                        rows_email = None
-                    subject = f"排班通知｜{current_user}｜{d2s(notify_start)}~{d2s(notify_end)}"
-                    body = _rows_to_email_text(subject, rows_email or [])
-                elif notify_type == "本稽查员的最新排班更新数据":
-                    if not auditor_id:
-                        st.error("请先在上方选择具体稽查员后再发送该通知。")
-                        rows_email = None
-                    else:
-                        rows_email = _schedule_rows_for_email(db, auditor_id=auditor_id, latest_only=True)
-                    subject = f"排班通知｜{current_user}｜最新排班更新"
-                    body = _rows_to_email_text(subject, rows_email or [])
-                elif notify_type == "公司本月所有排班数据":
-                    rows_email = _schedule_rows_for_email(db, start_date=month_start, end_date=month_end)
-                    subject = f"公司排班通知｜{year}年{month}月"
-                    body = _rows_to_email_text(subject, rows_email)
-                else:
-                    next_month_start = next_month
-                    next_month_next = (next_month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
-                    next_month_end = next_month_next - timedelta(days=1)
-                    rows_email = _schedule_rows_for_email(db, start_date=next_month_start, end_date=next_month_end)
-                    subject = f"公司排班通知｜下个月 {next_month_start.strftime('%Y-%m')}"
-                    body = _rows_to_email_text(subject, rows_email)
-
-            if 'rows_email' in locals() and rows_email is not None:
-                ok, msg = send_schedule_email(current_email, subject, body)
-                if ok:
-                    st.success(f"{msg}，已发送至：{current_email}")
-                else:
-                    st.error(msg)
-
     with db_session() as db:
         all_ics = build_ics_events(db)
         st.download_button("导出全部 ICS 日历", all_ics, file_name="wnrh_all.ics", key="dl_all_ics")
@@ -2231,36 +1951,21 @@ elif page == "账号管理":
                     st.error(msg)
 
     st.divider()
-    st.subheader("我的邮箱绑定")
-    current_email = get_user_email(current_user)
-    with st.form("bind_my_email_form", clear_on_submit=False):
-        bind_email = st.text_input("接收排班邮件的邮箱", value=current_email)
-        if st.form_submit_button("保存我的邮箱", type="primary"):
-            ok, msg = set_user_email(current_user, bind_email)
-            if ok:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
-
-    st.divider()
     if not is_admin:
         st.info("当前账号仅可修改自己的密码。新增登录人员、重置他人密码、配置可见板块仅管理员可操作。")
     else:
         st.subheader("新增登录人员")
         with st.form("create_user_form", clear_on_submit=True):
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3 = st.columns(3)
             new_username = c1.text_input("新账号")
             new_password = c2.text_input("初始密码（至少6位）", type="password")
             role = c3.selectbox("权限", ["普通用户", "管理员", "主管理员"])
-            new_email = c4.text_input("绑定邮箱（可空）")
             if st.form_submit_button("新增账号", type="primary"):
                 ok, msg = create_auth_user(
                     new_username,
                     new_password,
                     is_admin=(role in ("管理员", "主管理员")),
                     is_super_admin=(role == "主管理员"),
-                    email=new_email,
                 )
                 if ok:
                     st.success(msg)
@@ -2278,25 +1983,10 @@ elif page == "账号管理":
                     role_cn = "主管理员"
                 elif int(u.get("is_admin", 0)) == 1:
                     role_cn = "管理员"
-                rows.append({"账号": u.get("username"), "邮箱": u.get("email") or "", "权限": role_cn, "创建时间": u.get("created_at") or ""})
+                rows.append({"账号": u.get("username"), "权限": role_cn, "创建时间": u.get("created_at") or ""})
             show_table(rows, 260)
         else:
             st.info("暂无账号")
-
-        st.subheader("维护账号邮箱")
-        user_labels = [u["username"] for u in users]
-        if user_labels:
-            with st.form("bind_user_email_form", clear_on_submit=False):
-                c1, c2 = st.columns(2)
-                email_user = c1.selectbox("选择账号", user_labels, key="email_user_select")
-                email_value = c2.text_input("绑定邮箱", value=get_user_email(user_labels[0]) if user_labels else "")
-                if st.form_submit_button("保存账号邮箱"):
-                    ok, msg = set_user_email(email_user, email_value)
-                    if ok:
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.error(msg)
 
         st.subheader("重置其他人员密码")
         user_labels = [u["username"] for u in users]
