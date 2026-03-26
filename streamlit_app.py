@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from app.db import Base, SessionLocal, engine, ensure_schema
+from app.db import Base, SessionLocal, engine, ensure_schema, IS_SQLITE
 from app.models import Auditor, Task, Schedule, CityDistance, City
 from app.scheduler import (
     build_candidates,
