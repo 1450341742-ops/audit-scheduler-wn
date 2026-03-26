@@ -8,6 +8,8 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
+from types import SimpleNamespace
+from copy import copy
 
 import pandas as pd
 import streamlit as st
@@ -830,6 +832,61 @@ def assign_team_to_task(db: Session, task: Task, leader_id: int, member_ids: lis
 
     return True, "ok"
 
+
+
+def recommend_team_flexible(db: Session, task: Task, auditors: list[Auditor], schedules_all: list[Schedule]):
+    """
+    最终可用版逻辑：
+    - 若任务不要求 A 带队，则沿用原逻辑
+    - 若任务要求 A 带队，则仅限制【组长】必须为 A 且可带队
+    - 组员从全部可用候选人中补齐，不再强制全员 A
+    """
+    if not task:
+        return [], None
+
+    # 先走原始逻辑
+    base_candidates = build_candidates(db, task, auditors, schedules_all)
+    base_team = propose_team(task, base_candidates)
+    if base_team is not None:
+        return base_candidates, base_team
+
+    # 只有 need_expert=True 时才进入兜底逻辑
+    if not bool(getattr(task, "need_expert", False)):
+        return base_candidates, None
+
+    # 兜底：重新构造“仅组长要求 A”的候选池
+    shadow_task = copy(task)
+    shadow_task.need_expert = False
+    all_candidates = build_candidates(db, shadow_task, auditors, schedules_all)
+
+    leader_pool = [
+        c for c in all_candidates
+        if bool(getattr(c, "can_lead_team", False)) and str(getattr(c, "group_level", "")) == "A"
+    ]
+    if not leader_pool:
+        return all_candidates, None
+
+    leader = leader_pool[0]
+    need_n = max(0, int(getattr(task, "required_headcount", 1) or 1) - 1)
+
+    member_pool = [c for c in all_candidates if int(getattr(c, "auditor_id")) != int(getattr(leader, "auditor_id"))]
+    members = member_pool[:need_n]
+
+    if len(members) < need_n:
+        return all_candidates, None
+
+    avg_member_score = (sum(float(getattr(m, "score", 0)) for m in members) / len(members)) if members else 0.0
+    team_score = float(getattr(leader, "score", 0)) + avg_member_score
+
+    team = SimpleNamespace(
+        leader=leader,
+        members=members,
+        team_score=round(team_score, 1),
+        notes="已按最终逻辑处理：仅组长要求 A 带队，组员按全部可用候选人补齐",
+    )
+    return all_candidates, team
+
+
 def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
     if d2 < d1:
         d1, d2 = d2, d1
@@ -844,8 +901,7 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
 
     for t in tasks:
         schedules_all = db.query(Schedule).all()
-        candidates = build_candidates(db, t, auditors, schedules_all)
-        team = propose_team(t, candidates)
+        candidates, team = recommend_team_flexible(db, t, auditors, schedules_all)
 
         if mode == "optimized" and candidates:
             avg_cases = float(sum(int(a.monthly_cases or 0) for a in auditors) / max(1, len(auditors)))
@@ -894,7 +950,7 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
                 team = best_team
 
         if not team:
-            report["skipped"].append({"task_id": t.id, "project": t.project_name, "reason": "无可用团队"})
+            report["skipped"].append({"task_id": t.id, "project": t.project_name, "reason": "无可用团队（已按最终逻辑：仅组长要求A，组员允许其他可用人员）"})
             continue
 
         leader_id = int(team.leader.auditor_id)
@@ -1012,13 +1068,12 @@ if page == "智能排班":
                 task = db.query(Task).filter(Task.id == selected_task_id).first()
                 auditors = db.query(Auditor).all()
                 schedules_all = db.query(Schedule).all()
-                candidates = build_candidates(db, task, auditors, schedules_all) if task else []
-                team = propose_team(task, candidates) if task else None
+                candidates, team = recommend_team_flexible(db, task, auditors, schedules_all)
                 st.session_state["recommend_result"] = {
                     "task_id": selected_task_id,
                     "candidates": candidates[:25],
                     "team": team,
-                    "error": None if team else "无可用团队方案",
+                    "error": None if team else "无可用团队方案（已按“仅组长要求A，组员可为其他可用稽查员”的最终逻辑计算）",
                 }
             st.rerun()
 
