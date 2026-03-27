@@ -1051,7 +1051,13 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
             if t.need_expert:
                 leader_pool = [c for c in leader_pool if c.group_level == "A"]
             leader_pool = leader_pool[:5]
-            member_pool_all = candidates[:12]
+
+            if t.need_expert:
+                non_a_members = [c for c in candidates if c.group_level in ("B", "C")]
+                a_members = [c for c in candidates if c.group_level == "A"]
+                member_pool_all = (non_a_members + a_members)[:12]
+            else:
+                member_pool_all = candidates[:12]
             auditor_lookup = {a.id: a for a in auditors}
             best_team = None
             best_obj = None
