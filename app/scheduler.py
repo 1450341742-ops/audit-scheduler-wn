@@ -39,6 +39,15 @@ def _parse_names(raw):
     return [x.strip() for x in s.split(",") if x.strip()]
 
 
+def _member_rank_key(c):
+    """组员排序：优先非A（B/C），再按分数高、距离近、ID小。
+    这样在 need_expert=True 时，不会因为 A 分数普遍更高而总是出现全A组合。
+    """
+    level = _norm(getattr(c, "group_level", ""))
+    non_a_first = 0 if level in ("B", "C") else 1
+    return (non_a_first, -float(getattr(c, "score", 0.0)), float(getattr(c, "km", 0.0)), int(getattr(c, "auditor_id", 0)))
+
+
 def _same_week(d1, d2) -> bool:
     return d1.isocalendar()[:2] == d2.isocalendar()[:2]
 
@@ -238,6 +247,10 @@ def propose_team(task: Task, candidates):
         # 若组长本身就是硬指定成员，则从 must_have 里自然不再重复出现
         remaining_pool = [c for c in member_pool if _norm(getattr(c, "auditor_name", "")) not in specified_names]
 
+        # 需要A带队时，组员优先尝试 B/C，再不足时才补 A
+        if need_expert:
+            remaining_pool = sorted(remaining_pool, key=_member_rank_key)
+
         # 团队必须包含全部硬指定人员（组长已占用的话自动满足其中一人）
         members = must_have_members[:]
 
@@ -263,7 +276,7 @@ def propose_team(task: Task, candidates):
         if specified_names:
             notes = "最终稳定逻辑：硬指定成员必须入组，但系统继续自动补齐其他成员"
         elif need_expert:
-            notes = "最终稳定逻辑：仅组长要求A带队，组员按全部可用候选人补齐"
+            notes = "最终稳定逻辑：仅组长要求A带队；组员优先补B/C，不足时再补A"
         else:
             notes = "标准逻辑：组长可带队，组员按全部可用候选人补齐"
 
