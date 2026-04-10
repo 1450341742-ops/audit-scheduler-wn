@@ -944,8 +944,7 @@ def build_ics_events(db: Session, auditor_id: int | None = None):
         *events,
         "END:VCALENDAR",
     ]
-    return "
-".join(lines).encode("utf-8")
+    return "\r\n".join(lines).encode("utf-8")
 
 
 def update_auditor_record(
