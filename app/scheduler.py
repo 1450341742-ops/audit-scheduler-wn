@@ -112,11 +112,10 @@ def get_distance_km(db: Session, from_city: str, to_city: str) -> float:
 
 def build_candidates(db: Session, task: Task, auditors, schedules_all):
     """
-    稳定版候选池逻辑：
-    - 这里只做基础条件筛选
-    - 不因为 need_expert=True 就把所有候选人限制为 A
-    - “A带队”只在 propose_team 阶段限制 leader
-    - 硬指定人员：改为“必须包含”，不再是“只允许这些人”
+    性能优化版候选池逻辑：
+    - 先把排班记录按 auditor_id 预分组，避免每个候选人重复全表扫描
+    - 对周任务数与距离做本轮计算缓存
+    - 仍保持原业务规则不变
     """
     task_start = _task_start(task)
     task_end = _task_end(task)
@@ -125,6 +124,16 @@ def build_candidates(db: Session, task: Task, auditors, schedules_all):
     site_city = _norm(getattr(task, "site_city", ""))
     preferred_names = set(_parse_names(getattr(task, "preferred_experts", None)))
 
+    schedules_by_auditor = {}
+    for s in schedules_all or []:
+        try:
+            auditor_id = int(getattr(s, "auditor_id"))
+        except Exception:
+            continue
+        schedules_by_auditor.setdefault(auditor_id, []).append(s)
+
+    week_count_cache = {}
+    distance_cache = {}
     candidates = []
 
     for auditor in auditors:
@@ -142,10 +151,10 @@ def build_candidates(db: Session, task: Task, auditors, schedules_all):
         if required_gender in ("男", "女") and gender and gender != required_gender:
             continue
 
+        auditor_schedules = schedules_by_auditor.get(auditor_id, [])
+
         conflict = False
-        for s in schedules_all:
-            if int(getattr(s, "auditor_id")) != auditor_id:
-                continue
+        for s in auditor_schedules:
             s_start = getattr(s, "start_date", None)
             s_end = getattr(s, "end_date", None) or s_start
             if s_start and s_end and _overlap(task_start, task_end, s_start, s_end):
@@ -158,12 +167,17 @@ def build_candidates(db: Session, task: Task, auditors, schedules_all):
         if last_date and last_date >= task_start:
             continue
 
-        week_count = _count_week_tasks(auditor_id, task, schedules_all)
+        if auditor_id not in week_count_cache:
+            week_count_cache[auditor_id] = _count_week_tasks(auditor_id, task, auditor_schedules)
+        week_count = week_count_cache[auditor_id]
         if week_count >= max_weekly_tasks:
             continue
 
         from_city = compute_from_city(auditor, task)
-        km = float(get_distance_km(db, from_city, site_city))
+        dist_key = (from_city, site_city)
+        if dist_key not in distance_cache:
+            distance_cache[dist_key] = float(get_distance_km(db, from_city, site_city))
+        km = distance_cache[dist_key]
 
         distance_penalty = min(km / 35.0, 60.0)
         level_bonus = {"A": 12.0, "B": 6.0, "C": 0.0}.get(group_level, 0.0)
