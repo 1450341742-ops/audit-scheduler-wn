@@ -445,6 +445,39 @@ def sync_task_schedules_from_direct_assignments(task: Task):
     return True, '已按已定项目人员直接录入排班'
 
 
+def auto_fill_direct_assignments_from_specified(task_id: int, overwrite: bool = True):
+    ensure_support_tables()
+    with db_session() as db:
+        task = db.query(Task).filter(Task.id == int(task_id)).first()
+        if not task:
+            return False, "任务不存在"
+        specified_names = parse_name_list(getattr(task, "specified_auditors", None))
+        if not specified_names:
+            return False, "未填写硬指定人员"
+
+        rows_to_save = []
+        for idx, name in enumerate(specified_names):
+            auditor = db.query(Auditor).filter(Auditor.name == normalize_text(name)).first()
+            rows_to_save.append(
+                {
+                    "auditor_id": int(auditor.id) if auditor else None,
+                    "person_name": normalize_text(name),
+                    "is_part_time": False if auditor else True,
+                    "role": "leader" if idx == 0 else "member",
+                    "start_date": task.start_date,
+                    "end_date": task.end_date or task.start_date,
+                    "notes": "由硬指定人员自动生成",
+                }
+            )
+
+    existing = get_direct_assignments(int(task_id))
+    if existing and not overwrite:
+        return True, "已存在已定项目人员，未覆盖"
+
+    replace_direct_assignments(int(task_id), rows_to_save)
+    return True, "已根据硬指定人员自动生成直录排班"
+
+
 def _get_period_range(period_type: str, year: int, period_value: int):
     if period_type == 'monthly':
         start_d = date(year, int(period_value), 1)
@@ -1081,7 +1114,10 @@ def update_task_record(
             s.end_date = ed
             s.travel_to_city = obj.site_city
 
-        return safe_commit(db, f"更新任务#{task_id}")
+        ok = safe_commit(db, f"更新任务#{task_id}")
+    if ok and normalize_text(specified_auditors):
+        auto_fill_direct_assignments_from_specified(int(task_id), overwrite=True)
+    return ok
 
 
 def delete_task_record(task_id: int):
@@ -1164,6 +1200,31 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
     report = {"assigned": [], "skipped": [], "batch_week_counts": {}}
 
     for t in tasks:
+        direct_rows_existing = get_direct_assignments(int(t.id))
+        if direct_rows_existing:
+            report["assigned"].append(
+                {
+                    "task_id": t.id,
+                    "project": t.project_name,
+                    "leader": direct_rows_existing[0].get("person_name", ""),
+                    "members": [r.get("person_name", "") for r in direct_rows_existing[1:]],
+                }
+            )
+            continue
+
+        specified_names = parse_name_list(getattr(t, "specified_auditors", None))
+        if specified_names:
+            auto_fill_direct_assignments_from_specified(int(t.id), overwrite=True)
+            report["assigned"].append(
+                {
+                    "task_id": t.id,
+                    "project": t.project_name,
+                    "leader": specified_names[0] if specified_names else "",
+                    "members": specified_names[1:],
+                }
+            )
+            continue
+
         schedules_all = db.query(Schedule).all()
         candidates = build_candidates(db, t, auditors, schedules_all)
         team = propose_team(t, candidates)
@@ -1742,6 +1803,9 @@ elif page == "任务管理":
                     )
                     if not safe_commit(db, context=f"新增任务：{project_name.strip()}"):
                         st.stop()
+                    new_task_id = int(db.query(Task.id).order_by(Task.id.desc()).first()[0])
+                if specified.strip():
+                    auto_fill_direct_assignments_from_specified(new_task_id, overwrite=True)
                 clear_runtime_caches_after_data_change()
                 st.success("已新增")
                 st.rerun()
@@ -1924,7 +1988,12 @@ elif page == "任务管理":
             if save_direct:
                 rows_to_save = _normalize_direct_rows(edited_direct)
                 replace_direct_assignments(int(selected_task.id), rows_to_save)
-                st.success("已定项目人员已保存")
+                ok, msg = sync_task_schedules_from_direct_assignments(selected_task)
+                clear_runtime_caches_after_data_change()
+                if ok:
+                    st.success("已定项目人员已保存，并已同步到日历排班")
+                else:
+                    st.warning("已定项目人员已保存，但同步到日历排班失败：" + str(msg))
                 st.rerun()
 
             if sync_direct:
