@@ -8,7 +8,6 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
-from types import SimpleNamespace
 
 import pandas as pd
 import streamlit as st
@@ -205,7 +204,6 @@ def safe_commit(db: Session, context: str = "") -> bool:
         return False
 
 
-
 def clear_runtime_caches_after_data_change():
     for k in [
         "recommend_result",
@@ -217,167 +215,6 @@ def clear_runtime_caches_after_data_change():
     ]:
         if k in st.session_state:
             st.session_state.pop(k, None)
-
-    for fn_name in [
-        "get_tasks_cached",
-        "get_recent_schedules_cached",
-        "get_auditor_rows_cached",
-        "get_task_rows_cached",
-        "get_month_schedules_cached",
-        "get_auditors_for_calendar_cached",
-    ]:
-        fn = globals().get(fn_name)
-        if fn and hasattr(fn, "clear"):
-            try:
-                fn.clear()
-            except Exception:
-                pass
-
-
-@st.cache_data(ttl=30)
-def get_tasks_cached():
-    with db_session() as db:
-        rows = []
-        for t in db.query(Task).order_by(Task.id.desc()).all():
-            rows.append(
-                {
-                    "id": t.id,
-                    "project_name": t.project_name,
-                    "customer_name": t.customer_name,
-                    "need_expert": bool(t.need_expert),
-                    "required_headcount": int(t.required_headcount or 1),
-                    "required_days": int(t.required_days or 1),
-                    "required_gender": t.required_gender,
-                    "specified_auditors": t.specified_auditors,
-                    "preferred_experts": t.preferred_experts,
-                    "site_city": t.site_city,
-                    "start_date": t.start_date,
-                    "end_date": t.end_date,
-                }
-            )
-        return rows
-
-
-@st.cache_data(ttl=20)
-def get_recent_schedules_cached(limit: int = 120):
-    with db_session() as db:
-        schedules_recent = (
-            db.query(Schedule)
-            .options(joinedload(Schedule.task), joinedload(Schedule.auditor))
-            .order_by(Schedule.id.desc())
-            .limit(limit)
-            .all()
-        )
-        rows = []
-        for s in schedules_recent:
-            rows.append(
-                {
-                    "ID": s.id,
-                    "任务": f"#{s.task_id} {(s.task.project_name if s.task else '')}",
-                    "人员": f"#{s.auditor_id} {(s.auditor.name if s.auditor else '')} ({(s.auditor.group_level if s.auditor else '')})",
-                    "角色": s.role,
-                    "时间": f"{d2s(s.start_date)} ~ {d2s(s.end_date)}",
-                    "路线": f"{s.travel_from_city} → {s.travel_to_city}",
-                    "km": round(float(s.distance_km or 0), 1),
-                }
-            )
-        return rows
-
-
-@st.cache_data(ttl=30)
-def get_auditor_rows_cached():
-    with db_session() as db:
-        rows = []
-        for a in db.query(Auditor).order_by(Auditor.id.desc()).all():
-            rows.append(
-                {
-                    "ID": a.id,
-                    "姓名": a.name,
-                    "性别": a.gender,
-                    "等级": a.group_level,
-                    "可带队": "是" if a.can_lead_team else "否",
-                    "常驻城市": a.base_city,
-                    "周上限": a.max_weekly_tasks,
-                    "状态": STATUS_MAP_REV.get(a.status, a.status),
-                    "本月院次": a.monthly_cases,
-                    "差旅天数": a.travel_days,
-                    "连续天数": a.continuous_days,
-                    "上次结束城市": a.last_task_end_city or "",
-                    "上次结束日期": d2s(a.last_task_end_date),
-                }
-            )
-        return rows
-
-
-@st.cache_data(ttl=30)
-def get_task_rows_cached():
-    with db_session() as db:
-        rows = []
-        for t in db.query(Task).order_by(Task.id.desc()).all():
-            rows.append(
-                {
-                    "ID": t.id,
-                    "项目": t.project_name,
-                    "客户": t.customer_name or "",
-                    "需要A": "是" if t.need_expert else "否",
-                    "人数": t.required_headcount,
-                    "天数": t.required_days,
-                    "性别": t.required_gender,
-                    "硬指定": t.specified_auditors or "",
-                    "软指定": t.preferred_experts or "",
-                    "城市": t.site_city,
-                    "开始": d2s(t.start_date),
-                    "结束": d2s(t.end_date),
-                }
-            )
-        return rows
-
-
-@st.cache_data(ttl=20)
-def get_auditors_for_calendar_cached():
-    with db_session() as db:
-        return [{"id": a.id, "name": a.name} for a in db.query(Auditor).order_by(Auditor.name.asc()).all()]
-
-
-@st.cache_data(ttl=20)
-def get_month_schedules_cached(year: int, month: int):
-    month_start = date(int(year), int(month), 1)
-    next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
-    month_end = next_month - timedelta(days=1)
-
-    with db_session() as db:
-        all_schedules = (
-            db.query(Schedule)
-            .options(joinedload(Schedule.task), joinedload(Schedule.auditor))
-            .filter(Schedule.start_date <= month_end, Schedule.end_date >= month_start)
-            .order_by(Schedule.start_date.asc())
-            .all()
-        )
-
-        rows = []
-        seen_day_task = set()
-        for s in all_schedules:
-            uniq = (s.task_id, s.auditor_id, s.start_date, s.end_date)
-            if uniq in seen_day_task:
-                continue
-            seen_day_task.add(uniq)
-            rows.append(
-                {
-                    "id": s.id,
-                    "auditor_id": s.auditor_id,
-                    "auditor_name": (s.auditor.name if s.auditor else ""),
-                    "task_id": s.task_id,
-                    "project_name": (s.task.project_name if s.task else ""),
-                    "site_city": (s.task.site_city if s.task else ""),
-                    "role": s.role,
-                    "start_date": s.start_date,
-                    "end_date": s.end_date,
-                    "travel_from_city": s.travel_from_city,
-                    "travel_to_city": s.travel_to_city,
-                    "distance_km": float(s.distance_km or 0),
-                }
-            )
-        return rows
 
 
 def _safe_int(x, default=None):
@@ -394,63 +231,6 @@ def _safe_int(x, default=None):
         return default
 
 
-
-
-def parse_name_list(raw: str) -> list[str]:
-    s = str(raw or "").strip()
-    if not s:
-        return []
-    for sep in ["，", "、", ";", "；", "/", "|"]:
-        s = s.replace(sep, ",")
-    return [x.strip() for x in s.split(",") if x.strip()]
-
-
-def build_direct_entry_team(task: Task, candidates: list):
-    """
-    直录模式：
-    - 当硬指定人数 == 任务人数时，直接由硬指定成员组队
-    - 仍然校验这些人是否都在可用候选池内
-    """
-    specified_names = parse_name_list(getattr(task, "specified_auditors", None))
-    required_n = max(1, int(getattr(task, "required_headcount", 1) or 1))
-
-    if not specified_names or len(specified_names) != required_n:
-        return None, None
-
-    picked = [c for c in candidates if getattr(c, "auditor_name", "") in specified_names]
-    picked_names = {getattr(c, "auditor_name", "") for c in picked}
-    if set(specified_names) - picked_names:
-        missing = "、".join(sorted(set(specified_names) - picked_names))
-        return None, f"以下硬指定人员当前不可用或未入候选池：{missing}"
-
-    leader = None
-    if bool(getattr(task, "need_expert", False)):
-        for c in picked:
-            if bool(getattr(c, "can_lead_team", False)) and str(getattr(c, "group_level", "")) == "A":
-                leader = c
-                break
-        if leader is None:
-            return None, "硬指定成员中没有满足“A且可带队”的负责人，无法直录"
-    else:
-        for c in picked:
-            if bool(getattr(c, "can_lead_team", False)):
-                leader = c
-                break
-        if leader is None:
-            leader = picked[0]
-
-    members = [c for c in picked if int(getattr(c, "auditor_id")) != int(getattr(leader, "auditor_id"))]
-    avg_member_score = (sum(float(getattr(m, "score", 0.0)) for m in members) / len(members)) if members else 0.0
-    team_score = round(float(getattr(leader, "score", 0.0)) + avg_member_score, 1)
-
-    team = SimpleNamespace(
-        leader=leader,
-        members=members,
-        team_score=team_score,
-        notes="指定人员直录方案：硬指定人数等于任务人数，已直接按指定成员组成团队",
-    )
-    return team, None
-
 def normalize_text(v) -> str:
     if v is None:
         return ""
@@ -462,28 +242,26 @@ def normalize_text(v) -> str:
     return str(v).strip()
 
 
-
 def seed_city_distances_if_needed(db: Session):
-    # 云端数据库下，若已有数据，直接跳过，避免每次启动逐条查询导致卡顿
-    try:
-        if db.query(CityDistance).count() > 0:
-            return
-    except Exception:
-        return
-
     seen = set()
     for a, b, km in SEED_CITY_DISTANCES:
         a = str(a).strip()
         b = str(b).strip()
         if not a or not b or a == b:
             continue
-
         key = (a, b)
         if key in seen:
             continue
         seen.add(key)
+        exists = db.query(CityDistance).filter(CityDistance.from_city == a, CityDistance.to_city == b).first()
+        if exists:
+            continue
         db.add(CityDistance(from_city=a, to_city=b, km=float(km)))
-
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            continue
     safe_commit(db, "初始化城市距离")
 
 
@@ -491,29 +269,24 @@ SEED_CITIES = [(name, latlon[0], latlon[1]) for name, latlon in CITY_COORDS.item
 
 
 def seed_cities_if_needed(db: Session):
-    try:
-        if db.query(City).count() > 0:
-            return
-    except Exception:
+    if db.query(City).count() > 0:
         return
-
     for name, lat, lon in SEED_CITIES:
         nm = str(name).strip()
         if not nm:
             continue
         db.add(City(name=nm, lat=float(lat), lon=float(lon)))
-
+        try:
+            db.flush()
+        except IntegrityError:
+            db.rollback()
+            continue
     safe_commit(db, "初始化城市坐标")
 
 
-@st.cache_resource
-def init_reference_data():
-    with db_session() as db:
-        seed_city_distances_if_needed(db)
-        seed_cities_if_needed(db)
-
-
-init_reference_data()
+with db_session() as db:
+    seed_city_distances_if_needed(db)
+    seed_cities_if_needed(db)
 
 # -------------------- 权限 --------------------
 ALL_PAGES = [
@@ -521,6 +294,8 @@ ALL_PAGES = [
     "批量排班",
     "稽查员管理",
     "任务管理",
+    "指标统计",
+    "兼职库",
     "城市距离",
     "城市坐标",
     "模板导入",
@@ -528,12 +303,11 @@ ALL_PAGES = [
     "账号管理",
     "数据清理",
 ]
-DEFAULT_NORMAL_PAGES = ["任务管理", "稽查员管理", "日历视图"]
+DEFAULT_NORMAL_PAGES = ["任务管理", "稽查员管理", "日历视图", "指标统计"]
 
 
 def hash_password(password: str) -> str:
     return hashlib.sha256(str(password).encode("utf-8")).hexdigest()
-
 
 
 def ensure_auth_table():
@@ -557,20 +331,14 @@ def ensure_auth_table():
         with engine.begin() as conn:
             cols = conn.execute(text("PRAGMA table_info(auth_users)")).mappings().all()
             existing = {str(c.get("name")) for c in cols}
-
             if "is_super_admin" not in existing:
                 conn.execute(text("ALTER TABLE auth_users ADD COLUMN is_super_admin INTEGER NOT NULL DEFAULT 0"))
-
             if "allowed_pages_json" not in existing:
                 conn.execute(text("ALTER TABLE auth_users ADD COLUMN allowed_pages_json TEXT"))
     else:
         with engine.begin() as conn:
-            conn.execute(
-                text("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS is_super_admin INTEGER NOT NULL DEFAULT 0")
-            )
-            conn.execute(
-                text("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS allowed_pages_json TEXT")
-            )
+            conn.execute(text("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS is_super_admin INTEGER NOT NULL DEFAULT 0"))
+            conn.execute(text("ALTER TABLE auth_users ADD COLUMN IF NOT EXISTS allowed_pages_json TEXT"))
 
 def _bootstrap_seed_users() -> dict[str, str]:
     users = {}
@@ -594,7 +362,372 @@ def _bootstrap_seed_users() -> dict[str, str]:
     return users
 
 
-def bootstrap_auth_users_if_needed():
+def bootstrap_auth_users_if_needed()
+
+
+# -------------------- 扩展业务表：指标 / 兼职库 / 已定项目人员 --------------------
+def ensure_extra_tables():
+    with engine.begin() as conn:
+        if IS_SQLITE:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS project_targets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    period_type TEXT NOT NULL,
+                    year INTEGER NOT NULL,
+                    period_value INTEGER NOT NULL DEFAULT 0,
+                    target_projects INTEGER NOT NULL DEFAULT 0,
+                    target_staffing INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT
+                )
+            """))
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_project_targets_unique
+                ON project_targets(period_type, year, period_value)
+            """))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS part_time_staff (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    base_city TEXT,
+                    note TEXT,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT
+                )
+            """))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS direct_assignments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id INTEGER NOT NULL,
+                    auditor_id INTEGER,
+                    person_name TEXT NOT NULL,
+                    is_part_time INTEGER NOT NULL DEFAULT 0,
+                    role TEXT,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    notes TEXT,
+                    created_at TEXT
+                )
+            """))
+        else:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS project_targets (
+                    id BIGSERIAL PRIMARY KEY,
+                    period_type TEXT NOT NULL,
+                    year INTEGER NOT NULL,
+                    period_value INTEGER NOT NULL DEFAULT 0,
+                    target_projects INTEGER NOT NULL DEFAULT 0,
+                    target_staffing INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT
+                )
+            """))
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_project_targets_unique
+                ON project_targets(period_type, year, period_value)
+            """))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS part_time_staff (
+                    id BIGSERIAL PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    base_city TEXT,
+                    note TEXT,
+                    is_active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT
+                )
+            """))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS direct_assignments (
+                    id BIGSERIAL PRIMARY KEY,
+                    task_id INTEGER NOT NULL,
+                    auditor_id INTEGER,
+                    person_name TEXT NOT NULL,
+                    is_part_time INTEGER NOT NULL DEFAULT 0,
+                    role TEXT,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    notes TEXT,
+                    created_at TEXT
+                )
+            """))
+
+
+def parse_name_list(raw) -> list[str]:
+    s = str(raw or "").strip()
+    if not s:
+        return []
+    for sep in ["，", "、", ";", "；", "/", "|"]:
+        s = s.replace(sep, ",")
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def get_part_time_staff_rows(active_only: bool = False) -> list[dict]:
+    ensure_extra_tables()
+    sql = "SELECT id, name, base_city, note, is_active, created_at FROM part_time_staff"
+    if active_only:
+        sql += " WHERE is_active = 1"
+    sql += " ORDER BY is_active DESC, name ASC"
+    with engine.begin() as conn:
+        rows = conn.execute(text(sql)).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def save_part_time_staff(name: str, base_city: str = "", note: str = "", is_active: bool = True):
+    ensure_extra_tables()
+    nm = str(name or "").strip()
+    if not nm:
+        return False, "兼职姓名不能为空"
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with engine.begin() as conn:
+        if IS_SQLITE:
+            conn.execute(
+                text("""
+                    INSERT INTO part_time_staff(name, base_city, note, is_active, created_at)
+                    VALUES(:name, :base_city, :note, :is_active, :created_at)
+                    ON CONFLICT(name) DO UPDATE SET
+                        base_city=excluded.base_city,
+                        note=excluded.note,
+                        is_active=excluded.is_active
+                """),
+                {"name": nm, "base_city": base_city.strip(), "note": note.strip(), "is_active": 1 if is_active else 0, "created_at": now},
+            )
+        else:
+            conn.execute(
+                text("""
+                    INSERT INTO part_time_staff(name, base_city, note, is_active, created_at)
+                    VALUES(:name, :base_city, :note, :is_active, :created_at)
+                    ON CONFLICT (name) DO UPDATE SET
+                        base_city=EXCLUDED.base_city,
+                        note=EXCLUDED.note,
+                        is_active=EXCLUDED.is_active
+                """),
+                {"name": nm, "base_city": base_city.strip(), "note": note.strip(), "is_active": 1 if is_active else 0, "created_at": now},
+            )
+    return True, "兼职库已保存"
+
+
+def delete_part_time_staff(staff_id: int):
+    ensure_extra_tables()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM part_time_staff WHERE id=:id"), {"id": int(staff_id)})
+    return True, "兼职人员已删除"
+
+
+def get_direct_assignments(task_id: int) -> list[dict]:
+    ensure_extra_tables()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT id, task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, notes, created_at
+                FROM direct_assignments
+                WHERE task_id = :task_id
+                ORDER BY start_date ASC, person_name ASC
+            """),
+            {"task_id": int(task_id)},
+        ).mappings().all()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["is_part_time"] = bool(d.get("is_part_time", 0))
+        out.append(d)
+    return out
+
+
+def replace_direct_assignments(task_id: int, rows: list[dict]):
+    ensure_extra_tables()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM direct_assignments WHERE task_id=:task_id"), {"task_id": int(task_id)})
+        for r in rows:
+            conn.execute(
+                text("""
+                    INSERT INTO direct_assignments(task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, notes, created_at)
+                    VALUES(:task_id, :auditor_id, :person_name, :is_part_time, :role, :start_date, :end_date, :notes, :created_at)
+                """),
+                {
+                    "task_id": int(task_id),
+                    "auditor_id": r.get("auditor_id"),
+                    "person_name": str(r.get("person_name", "")).strip(),
+                    "is_part_time": 1 if bool(r.get("is_part_time", False)) else 0,
+                    "role": str(r.get("role", "member")).strip() or "member",
+                    "start_date": d2s(safe_parse_date(r.get("start_date"))),
+                    "end_date": d2s(safe_parse_date(r.get("end_date"))),
+                    "notes": str(r.get("notes", "")).strip(),
+                    "created_at": now,
+                },
+            )
+
+
+def sync_task_schedules_from_direct_assignments(task: Task):
+    """
+    已定项目人员直录：
+    - direct_assignments 为数据源
+    - 内部稽查员写入 Schedule，兼职仅保留在 direct_assignments 中
+    - 若 task 已有 direct_assignments，则日历与统计优先读取 direct_assignments
+    """
+    rows = get_direct_assignments(int(task.id))
+    if not rows:
+        return False, "未录入已定项目人员"
+
+    with db_session() as db:
+        # 删除本任务原有标准排班
+        db.query(Schedule).filter(Schedule.task_id == int(task.id)).delete()
+
+        for r in rows:
+            if bool(r.get("is_part_time")):
+                continue
+            auditor_id = r.get("auditor_id")
+            if auditor_id is None:
+                continue
+
+            auditor = db.query(Auditor).filter(Auditor.id == int(auditor_id)).first()
+            if not auditor:
+                return False, f"未找到稽查员ID={auditor_id}"
+
+            sd = safe_parse_date(r.get("start_date"))
+            ed = safe_parse_date(r.get("end_date"))
+            if not sd or not ed:
+                return False, f"{r.get('person_name')} 的日期无效"
+            if ed < sd:
+                return False, f"{r.get('person_name')} 的结束日期不能早于开始日期"
+
+            # 冲突校验
+            others = db.query(Schedule).filter(Schedule.auditor_id == int(auditor_id), Schedule.task_id != int(task.id)).all()
+            for s in others:
+                if not (ed < s.start_date or s.end_date < sd):
+                    return False, f"{r.get('person_name')} 与已有任务时间冲突"
+
+            from_city = compute_from_city(auditor, task)
+            km = get_distance_km(db, from_city, task.site_city)
+            db.add(
+                Schedule(
+                    task_id=int(task.id),
+                    auditor_id=int(auditor_id),
+                    role=str(r.get("role", "member")) or "member",
+                    start_date=sd,
+                    end_date=ed,
+                    travel_from_city=from_city,
+                    travel_to_city=task.site_city,
+                    distance_km=float(km),
+                    score=0.0,
+                    status="confirmed",
+                )
+            )
+
+        if not safe_commit(db, f"同步已定项目人员到排班：task#{task.id}"):
+            return False, "同步失败"
+    return True, "已按指定人员完成直录排班"
+
+
+def get_target_row(period_type: str, year: int, period_value: int = 0) -> dict:
+    ensure_extra_tables()
+    with engine.begin() as conn:
+        row = conn.execute(
+            text("""
+                SELECT id, period_type, year, period_value, target_projects, target_staffing, created_at
+                FROM project_targets
+                WHERE period_type=:period_type AND year=:year AND period_value=:period_value
+            """),
+            {"period_type": period_type, "year": int(year), "period_value": int(period_value)},
+        ).mappings().first()
+    return dict(row) if row else {
+        "period_type": period_type,
+        "year": int(year),
+        "period_value": int(period_value),
+        "target_projects": 0,
+        "target_staffing": 0,
+    }
+
+
+def save_target_row(period_type: str, year: int, period_value: int, target_projects: int, target_staffing: int):
+    ensure_extra_tables()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with engine.begin() as conn:
+        if IS_SQLITE:
+            conn.execute(
+                text("""
+                    INSERT INTO project_targets(period_type, year, period_value, target_projects, target_staffing, created_at)
+                    VALUES(:period_type, :year, :period_value, :target_projects, :target_staffing, :created_at)
+                    ON CONFLICT(period_type, year, period_value) DO UPDATE SET
+                        target_projects=excluded.target_projects,
+                        target_staffing=excluded.target_staffing
+                """),
+                {
+                    "period_type": period_type, "year": int(year), "period_value": int(period_value),
+                    "target_projects": int(target_projects), "target_staffing": int(target_staffing), "created_at": now
+                },
+            )
+        else:
+            conn.execute(
+                text("""
+                    INSERT INTO project_targets(period_type, year, period_value, target_projects, target_staffing, created_at)
+                    VALUES(:period_type, :year, :period_value, :target_projects, :target_staffing, :created_at)
+                    ON CONFLICT (period_type, year, period_value) DO UPDATE SET
+                        target_projects=EXCLUDED.target_projects,
+                        target_staffing=EXCLUDED.target_staffing
+                """),
+                {
+                    "period_type": period_type, "year": int(year), "period_value": int(period_value),
+                    "target_projects": int(target_projects), "target_staffing": int(target_staffing), "created_at": now
+                },
+            )
+
+
+def _period_range(period_type: str, year: int, period_value: int):
+    if period_type == "monthly":
+        start = date(int(year), int(period_value), 1)
+        next_month = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        end = next_month - timedelta(days=1)
+        return start, end
+    if period_type == "quarterly":
+        month = (int(period_value) - 1) * 3 + 1
+        start = date(int(year), month, 1)
+        next_month = date(int(year), month + 3, 1) if month < 10 else date(int(year) + 1, 1, 1)
+        end = next_month - timedelta(days=1)
+        return start, end
+    return date(int(year), 1, 1), date(int(year), 12, 31)
+
+
+def get_progress_stats(period_type: str, year: int, period_value: int):
+    start, end = _period_range(period_type, year, period_value)
+    with db_session() as db:
+        tasks = db.query(Task).filter(Task.start_date >= start, Task.start_date <= end).all()
+        schedule_rows = db.query(Schedule).filter(Schedule.start_date <= end, Schedule.end_date >= start).all()
+
+    direct_rows = []
+    for task in tasks:
+        direct_rows.extend(get_direct_assignments(int(task.id)))
+
+    task_ids = {int(t.id) for t in tasks}
+    direct_task_ids = {int(r["task_id"]) for r in direct_rows}
+
+    actual_projects = len(task_ids)
+    staffing_from_schedules = len({(int(s.task_id), int(s.auditor_id), d2s(s.start_date), d2s(s.end_date)) for s in schedule_rows if int(s.task_id) in task_ids and int(s.task_id) not in direct_task_ids})
+    staffing_from_direct = len({(int(r["task_id"]), str(r["person_name"]), str(r["start_date"]), str(r["end_date"])) for r in direct_rows})
+    actual_staffing = staffing_from_schedules + staffing_from_direct
+
+    rows = []
+    for t in tasks:
+        direct_for_task = [r for r in direct_rows if int(r["task_id"]) == int(t.id)]
+        if direct_for_task:
+            planned = int(t.required_headcount or 0)
+            actual = len({str(r["person_name"]) for r in direct_for_task})
+        else:
+            planned = int(t.required_headcount or 0)
+            actual = len({int(s.auditor_id) for s in schedule_rows if int(s.task_id) == int(t.id)})
+        rows.append({
+            "任务ID": int(t.id),
+            "项目": t.project_name,
+            "开始日期": d2s(t.start_date),
+            "中心城市": t.site_city,
+            "计划人数": planned,
+            "已安排人数": actual,
+            "人员安排完成率": f"{round((actual / planned * 100), 1) if planned else 0.0}%",
+        })
+
+    return start, end, actual_projects, actual_staffing, rows
+
+
+ensure_extra_tables()
+:
     ensure_auth_table()
     with engine.begin() as conn:
         count = conn.execute(text("SELECT COUNT(*) FROM auth_users")).scalar() or 0
@@ -1098,13 +1231,7 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
     report = {"assigned": [], "skipped": [], "batch_week_counts": {}}
 
     for t in tasks:
-        task_start = t.start_date
-        task_end = t.end_date or (t.start_date + timedelta(days=max(1, int(t.required_days or 1)) - 1))
-        schedules_all = (
-            db.query(Schedule)
-            .filter(Schedule.start_date <= task_end, Schedule.end_date >= task_start)
-            .all()
-        )
+        schedules_all = db.query(Schedule).all()
         candidates = build_candidates(db, t, auditors, schedules_all)
         team = propose_team(t, candidates)
 
@@ -1236,12 +1363,28 @@ if page == "智能排班":
     st.subheader("智能排班")
     st.caption("先按硬约束筛选，再按距离优先 + 适度负荷均衡评分推荐。")
 
-    task_rows = get_tasks_cached()
-    schedules_recent_rows = get_recent_schedules_cached(120)
-    tasks = [
-        type("TaskLite", (), row)()
-        for row in task_rows
-    ]
+    with db_session() as db:
+        tasks = db.query(Task).order_by(Task.id.desc()).all()
+        schedules_recent = (
+            db.query(Schedule)
+            .options(joinedload(Schedule.task), joinedload(Schedule.auditor))
+            .order_by(Schedule.id.desc())
+            .limit(120)
+            .all()
+        )
+        schedules_recent_rows = []
+        for s in schedules_recent:
+            schedules_recent_rows.append(
+                {
+                    "ID": s.id,
+                    "任务": f"#{s.task_id} {(s.task.project_name if s.task else '')}",
+                    "人员": f"#{s.auditor_id} {(s.auditor.name if s.auditor else '')} ({(s.auditor.group_level if s.auditor else '')})",
+                    "角色": s.role,
+                    "时间": f"{d2s(s.start_date)} ~ {d2s(s.end_date)}",
+                    "路线": f"{s.travel_from_city} → {s.travel_to_city}",
+                    "km": round(float(s.distance_km or 0), 1),
+                }
+            )
 
     if not tasks:
         st.info("请先在【任务管理】中录入任务。")
@@ -1258,16 +1401,7 @@ if page == "智能排班":
             with db_session() as db:
                 task = db.query(Task).filter(Task.id == selected_task_id).first()
                 auditors = db.query(Auditor).all()
-                if task:
-                    task_start = task.start_date
-                    task_end = task.end_date or (task.start_date + timedelta(days=max(1, int(task.required_days or 1)) - 1))
-                    schedules_all = (
-                        db.query(Schedule)
-                        .filter(Schedule.start_date <= task_end, Schedule.end_date >= task_start)
-                        .all()
-                    )
-                else:
-                    schedules_all = []
+                schedules_all = db.query(Schedule).all()
                 candidates = build_candidates(db, task, auditors, schedules_all) if task else []
                 team = propose_team(task, candidates) if task else None
                 st.session_state["recommend_result"] = {
@@ -1307,8 +1441,6 @@ if page == "智能排班":
                 else:
                     st.write("**组员：** 无")
                 st.caption(f"{team.notes}｜团队评分 {team.team_score}")
-                if "直录" in str(getattr(team, "notes", "")):
-                    st.success("当前为指定人员直录方案，团队成员已按硬指定名单直接生成")
                 default_member_ids = ",".join([str(m.auditor_id) for m in team.members])
                 member_ids_text = st.text_input("确认指派前，可手工调整组员ID（逗号分隔）", value=default_member_ids, key="member_ids_text")
                 if st.button("确认指派", type="primary", key="confirm_assign_btn"):
@@ -1459,7 +1591,25 @@ elif page == "稽查员管理":
     with db_session() as db:
         auditors = db.query(Auditor).order_by(Auditor.id.desc()).all()
 
-    rows = get_auditor_rows_cached()
+    rows = []
+    for a in auditors:
+        rows.append(
+            {
+                "ID": a.id,
+                "姓名": a.name,
+                "性别": a.gender,
+                "等级": a.group_level,
+                "可带队": "是" if a.can_lead_team else "否",
+                "常驻城市": a.base_city,
+                "周上限": a.max_weekly_tasks,
+                "状态": STATUS_MAP_REV.get(a.status, a.status),
+                "本月院次": a.monthly_cases,
+                "差旅天数": a.travel_days,
+                "连续天数": a.continuous_days,
+                "上次结束城市": a.last_task_end_city or "",
+                "上次结束日期": d2s(a.last_task_end_date),
+            }
+        )
 
     show_table(rows, 320)
 
@@ -1548,7 +1698,7 @@ elif page == "任务管理":
         site_city = c7.text_input("中心城市*")
 
         c8, c9, c10 = st.columns(3)
-        specified = c8.text_input("硬指定人员（可空）")
+        specified = c8.text_input("硬指定人员（可空，支持 ，、分隔）")
         preferred = c9.text_input("软指定专家/老师（可空）")
         start_date = c10.date_input("开始日期*", value=date.today())
         default_end = start_date + timedelta(days=max(1, int(required_days)) - 1)
@@ -1584,8 +1734,26 @@ elif page == "任务管理":
 
     with db_session() as db:
         tasks = db.query(Task).order_by(Task.id.desc()).all()
+        auditors = db.query(Auditor).order_by(Auditor.name.asc()).all()
 
-    rows = get_task_rows_cached()
+    rows = []
+    for t in tasks:
+        rows.append(
+            {
+                "ID": t.id,
+                "项目": t.project_name,
+                "客户": t.customer_name or "",
+                "需要A": "是" if t.need_expert else "否",
+                "人数": t.required_headcount,
+                "天数": t.required_days,
+                "性别": t.required_gender,
+                "硬指定": t.specified_auditors or "",
+                "软指定": t.preferred_experts or "",
+                "城市": t.site_city,
+                "开始": d2s(t.start_date),
+                "结束": d2s(t.end_date),
+            }
+        )
 
     show_table(rows, 320)
 
@@ -1655,6 +1823,199 @@ elif page == "任务管理":
                     st.success("任务已删除")
                     st.rerun()
 
+            st.divider()
+            st.subheader("已定项目人员录入 / 直录排班")
+            st.caption("适用于项目经理已完成排班，不需要系统推荐。支持内部稽查员与兼职人员，且可分别设置每个人在项目中的起止日期。")
+
+            part_time_rows = get_part_time_staff_rows(active_only=True)
+            auditor_name_to_id = {a.name: a.id for a in auditors}
+            auditor_name_options = [a.name for a in auditors]
+            part_time_options = [r["name"] for r in part_time_rows]
+
+            existing_direct = get_direct_assignments(int(selected_task.id))
+            if existing_direct:
+                direct_df = pd.DataFrame([
+                    {
+                        "类型": "兼职" if bool(r.get("is_part_time")) else "内部稽查员",
+                        "人员姓名": r.get("person_name", ""),
+                        "角色": "组长" if str(r.get("role", "")) == "leader" else "成员",
+                        "开始日期": str(r.get("start_date", "")),
+                        "结束日期": str(r.get("end_date", "")),
+                        "备注": r.get("notes", "") or "",
+                    }
+                    for r in existing_direct
+                ])
+            else:
+                default_names = parse_name_list(selected_task.specified_auditors or "")
+                if default_names:
+                    direct_df = pd.DataFrame([
+                        {
+                            "类型": "内部稽查员" if nm in auditor_name_to_id else "兼职",
+                            "人员姓名": nm,
+                            "角色": "成员",
+                            "开始日期": d2s(selected_task.start_date),
+                            "结束日期": d2s(selected_task.end_date),
+                            "备注": "",
+                        }
+                        for nm in default_names
+                    ])
+                else:
+                    direct_df = pd.DataFrame(columns=["类型", "人员姓名", "角色", "开始日期", "结束日期", "备注"])
+
+            with st.form("direct_assign_form", clear_on_submit=False):
+                edited_direct = st.data_editor(
+                    direct_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    num_rows="dynamic",
+                    key=f"direct_assign_editor_{selected_task.id}",
+                    column_config={
+                        "类型": st.column_config.SelectboxColumn(options=["内部稽查员", "兼职"]),
+                        "人员姓名": st.column_config.TextColumn(help="内部稽查员可填写系统内姓名；兼职可填写兼职库姓名"),
+                        "角色": st.column_config.SelectboxColumn(options=["组长", "成员"]),
+                        "开始日期": st.column_config.TextColumn(help="格式 YYYY-MM-DD"),
+                        "结束日期": st.column_config.TextColumn(help="格式 YYYY-MM-DD"),
+                        "备注": st.column_config.TextColumn(),
+                    },
+                )
+                c1, c2 = st.columns(2)
+                save_direct = c1.form_submit_button("保存已定项目人员")
+                sync_direct = c2.form_submit_button("按已定人员直接录入排班", type="primary")
+
+            def _normalize_direct_rows(df_in):
+                rows_out = []
+                for _, r in pd.DataFrame(df_in).iterrows():
+                    person_name = str(r.get("人员姓名", "")).strip()
+                    if not person_name:
+                        continue
+                    role = "leader" if str(r.get("角色", "")).strip() == "组长" else "member"
+                    is_part_time = str(r.get("类型", "")).strip() == "兼职"
+                    sd = safe_parse_date(r.get("开始日期"))
+                    ed = safe_parse_date(r.get("结束日期"))
+                    if not sd or not ed:
+                        continue
+                    rows_out.append(
+                        {
+                            "auditor_id": None if is_part_time else auditor_name_to_id.get(person_name),
+                            "person_name": person_name,
+                            "is_part_time": is_part_time,
+                            "role": role,
+                            "start_date": sd,
+                            "end_date": ed,
+                            "notes": str(r.get("备注", "")).strip(),
+                        }
+                    )
+                return rows_out
+
+            if save_direct:
+                rows_to_save = _normalize_direct_rows(edited_direct)
+                replace_direct_assignments(int(selected_task.id), rows_to_save)
+                st.success("已定项目人员已保存")
+                st.rerun()
+
+            if sync_direct:
+                rows_to_save = _normalize_direct_rows(edited_direct)
+                if not rows_to_save:
+                    st.error("请先录入至少1条已定项目人员")
+                else:
+                    replace_direct_assignments(int(selected_task.id), rows_to_save)
+                    ok, msg = sync_task_schedules_from_direct_assignments(selected_task)
+                    if ok:
+                        clear_runtime_caches_after_data_change()
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+
+
+# -------------------- 页面：指标统计 --------------------
+elif page == "指标统计":
+    st.subheader("指标统计")
+    st.caption("支持录入月度、季度、年度项目/人员安排指标，并结合系统数据自动计算完成进度。")
+
+    c1, c2, c3 = st.columns(3)
+    period_type = c1.selectbox("统计周期", ["monthly", "quarterly", "yearly"], format_func=lambda x: {"monthly":"月度","quarterly":"季度","yearly":"年度"}[x])
+    year = c2.number_input("年份", min_value=2024, max_value=2035, value=date.today().year, step=1)
+    if period_type == "monthly":
+        period_value = c3.selectbox("月份", list(range(1, 13)), index=max(0, date.today().month - 1))
+    elif period_type == "quarterly":
+        period_value = c3.selectbox("季度", [1, 2, 3, 4], index=(date.today().month - 1)//3)
+    else:
+        period_value = 0
+        c3.markdown("**全年**")
+
+    target = get_target_row(period_type, int(year), int(period_value))
+    with st.form("target_form", clear_on_submit=False):
+        c1, c2 = st.columns(2)
+        target_projects = c1.number_input("项目指标数量", min_value=0, value=int(target.get("target_projects", 0) or 0), step=1)
+        target_staffing = c2.number_input("人员安排指标数量", min_value=0, value=int(target.get("target_staffing", 0) or 0), step=1)
+        if st.form_submit_button("保存指标", type="primary"):
+            save_target_row(period_type, int(year), int(period_value), int(target_projects), int(target_staffing))
+            st.success("指标已保存")
+            st.rerun()
+
+    start_d, end_d, actual_projects, actual_staffing, detail_rows = get_progress_stats(period_type, int(year), int(period_value))
+    target = get_target_row(period_type, int(year), int(period_value))
+    t_projects = int(target.get("target_projects", 0) or 0)
+    t_staff = int(target.get("target_staffing", 0) or 0)
+
+    summary_df = pd.DataFrame([
+        {"指标": "项目完成数", "目标": t_projects, "实际": actual_projects, "完成率": f"{round(actual_projects / t_projects * 100, 1) if t_projects else 0.0}%"},
+        {"指标": "人员安排数", "目标": t_staff, "实际": actual_staffing, "完成率": f"{round(actual_staffing / t_staff * 100, 1) if t_staff else 0.0}%"},
+    ])
+    st.write(f"统计区间：{d2s(start_d)} ~ {d2s(end_d)}")
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    st.bar_chart(summary_df.set_index("指标")[["目标", "实际"]])
+
+    st.subheader("项目完成进度及人员安排进度明细")
+    if detail_rows:
+        st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("该统计区间暂无项目数据")
+
+# -------------------- 页面：兼职库 --------------------
+elif page == "兼职库":
+    st.subheader("兼职库")
+    st.caption("兼职人员不会进入系统自动推荐，仅用于已定项目人员录入与直录排班场景。")
+
+    with st.form("part_time_form", clear_on_submit=True):
+        c1, c2, c3 = st.columns(3)
+        pt_name = c1.text_input("兼职姓名*")
+        pt_city = c2.text_input("常驻城市（可空）")
+        pt_active = c3.selectbox("状态", ["启用", "停用"], index=0)
+        pt_note = st.text_input("备注（可空）")
+        if st.form_submit_button("保存兼职人员", type="primary"):
+            ok, msg = save_part_time_staff(pt_name, pt_city, pt_note, is_active=(pt_active == "启用"))
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+
+    rows = get_part_time_staff_rows(active_only=False)
+    if rows:
+        show_table([
+            {
+                "ID": r["id"],
+                "姓名": r["name"],
+                "常驻城市": r.get("base_city") or "",
+                "状态": "启用" if int(r.get("is_active", 0)) == 1 else "停用",
+                "备注": r.get("note") or "",
+            } for r in rows
+        ], 280)
+
+        deletable = {f"#{r['id']} {r['name']}": r["id"] for r in rows}
+        c1, c2 = st.columns([2, 1])
+        del_label = c1.selectbox("选择要删除的兼职人员", list(deletable.keys()))
+        if c2.button("删除兼职人员"):
+            ok, msg = delete_part_time_staff(deletable[del_label])
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+    else:
+        st.info("暂无兼职人员")
 # -------------------- 城市距离 --------------------
 elif page == "城市距离":
     st.subheader("城市距离")
@@ -1999,18 +2360,18 @@ elif page == "模板导入":
             st.rerun()
 
 # -------------------- 日历视图 --------------------
-
 elif page == "日历视图":
     st.subheader("日历视图")
     st.caption("按月查看排班、节假日标识，并支持导出 ICS 日历。")
 
-    auditor_rows = get_auditors_for_calendar_cached()
+    c1, c2, c3 = st.columns(3)
+    with db_session() as db:
+        auditors = db.query(Auditor).order_by(Auditor.name.asc()).all()
 
     auditor_options = {"全部稽查员": None}
-    for a in auditor_rows:
-        auditor_options[f"#{a['id']} {a['name']}"] = a["id"]
+    for a in auditors:
+        auditor_options[f"#{a.id} {a.name}"] = a.id
 
-    c1, c2, c3 = st.columns(3)
     auditor_label = c1.selectbox("筛选稽查员", list(auditor_options.keys()), key="cal_auditor_filter")
     year = c2.selectbox("年份", list(range(date.today().year - 2, date.today().year + 3)), index=2, key="cal_year")
     month = c3.selectbox("月份", list(range(1, 13)), index=date.today().month - 1, key="cal_month")
@@ -2020,27 +2381,92 @@ elif page == "日历视图":
     next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
     month_end = next_month - timedelta(days=1)
 
-    all_schedules_rows = get_month_schedules_cached(int(year), int(month))
+    with db_session() as db:
+        all_schedules = (
+            db.query(Schedule)
+            .options(joinedload(Schedule.task), joinedload(Schedule.auditor))
+            .filter(Schedule.start_date <= month_end, Schedule.end_date >= month_start)
+            .order_by(Schedule.start_date.asc())
+            .all()
+        )
 
-    filtered = []
-    for s in all_schedules_rows:
-        if auditor_id and s.get("auditor_id") != auditor_id:
+    direct_rows_raw = []
+    ensure_extra_tables()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT da.id, da.task_id, da.auditor_id, da.person_name, da.is_part_time, da.role, da.start_date, da.end_date, da.notes,
+                       t.project_name, t.site_city
+                FROM direct_assignments da
+                LEFT JOIN tasks t ON da.task_id = t.id
+                WHERE da.start_date <= :month_end AND da.end_date >= :month_start
+                ORDER BY da.start_date ASC, da.person_name ASC
+            """),
+            {"month_start": d2s(month_start), "month_end": d2s(month_end)},
+        ).mappings().all()
+        direct_rows_raw = [dict(r) for r in rows]
+
+    direct_task_ids = {int(r["task_id"]) for r in direct_rows_raw}
+    all_schedules_rows = []
+
+    for s in all_schedules:
+        if int(s.task_id) in direct_task_ids:
             continue
-        if s.get("start_date") <= month_end and s.get("end_date") >= month_start:
-            filtered.append(s)
+        if auditor_id and s.auditor_id != auditor_id:
+            continue
+        all_schedules_rows.append(
+            {
+                "id": s.id,
+                "auditor_id": s.auditor_id,
+                "auditor_name": (s.auditor.name if s.auditor else ""),
+                "task_id": s.task_id,
+                "project_name": (s.task.project_name if s.task else ""),
+                "site_city": (s.task.site_city if s.task else ""),
+                "role": s.role,
+                "start_date": s.start_date,
+                "end_date": s.end_date,
+                "travel_from_city": s.travel_from_city,
+                "travel_to_city": s.travel_to_city,
+                "distance_km": float(s.distance_km or 0),
+                "source": "schedule",
+            }
+        )
 
+    direct_rows = []
+    for r in direct_rows_raw:
+        if auditor_id and r.get("auditor_id") and int(r.get("auditor_id")) != int(auditor_id):
+            continue
+        direct_rows.append(
+            {
+                "id": r.get("id"),
+                "auditor_id": r.get("auditor_id"),
+                "auditor_name": r.get("person_name") or "",
+                "task_id": r.get("task_id"),
+                "project_name": r.get("project_name") or "",
+                "site_city": r.get("site_city") or "",
+                "role": r.get("role") or "member",
+                "start_date": safe_parse_date(r.get("start_date")),
+                "end_date": safe_parse_date(r.get("end_date")),
+                "travel_from_city": "",
+                "travel_to_city": r.get("site_city") or "",
+                "distance_km": 0.0,
+                "source": "direct",
+            }
+        )
+
+    merged_rows = all_schedules_rows + direct_rows
     day_marks = {it.get("date"): it for it in load_day_marks() if it.get("date", "")[:7] == month_start.strftime("%Y-%m")}
 
     events_by_day = {}
-    for s in filtered:
+    for s in merged_rows:
         cur = s.get("start_date")
-        while cur and cur <= s.get("end_date"):
-            events_by_day.setdefault(cur, [])
-            proj = s.get("project_name") or f"任务#{s.get('task_id')}"
-            person = s.get("auditor_name") or f"稽查员#{s.get('auditor_id')}"
-            ev = f"#{s.get('task_id')} {proj}｜{person}"
-            if ev not in events_by_day[cur]:
-                events_by_day[cur].append(ev)
+        end_d = s.get("end_date")
+        while cur and end_d and cur <= end_d:
+            key = (cur.isoformat(), int(s.get("task_id")))
+            events_by_day.setdefault(key, {"project": s.get("project_name") or f"任务#{s.get('task_id')}", "task_id": s.get("task_id"), "persons": [], "city": s.get("site_city") or ""})
+            nm = s.get("auditor_name") or ""
+            if nm and nm not in events_by_day[key]["persons"]:
+                events_by_day[key]["persons"].append(nm)
             cur += timedelta(days=1)
 
     st.subheader(f"{year}年{month}月 日历总览")
@@ -2065,18 +2491,25 @@ elif page == "日历视图":
             mk = day_marks.get(day.isoformat())
             if mk:
                 marks.append(mk.get("label") or mk.get("type") or "标记")
-            evs = events_by_day.get(day, [])
+
+            evs = []
+            for (day_iso, task_id), obj in events_by_day.items():
+                if day_iso != day.isoformat():
+                    continue
+                evs.append(f"#{task_id} {obj['project']}｜{'、'.join(obj['persons'])}")
+
             color = "#ffffff"
             if day.month != month:
                 color = "#f7f7f7"
             elif evs:
                 color = "#eef6ff"
+
             cols[idx].markdown(
                 f"<div style='border:1px solid #ddd;border-radius:8px;padding:8px;min-height:120px;background:{color};'>"
                 f"<div style='font-weight:600'>{day.day}</div>"
                 + (f"<div style='color:#d97706;font-size:12px'>{' / '.join(marks)}</div>" if marks else "")
-                + ("" if not evs else "".join([f"<div style='font-size:12px;margin-top:4px'>{e}</div>" for e in evs[:4]]))
-                + (f"<div style='font-size:12px;color:#666'>还有 {len(evs)-4} 项</div>" if len(evs) > 4 else "")
+                + ("" if not evs else "".join([f"<div style='font-size:12px;margin-top:4px'>{e}</div>" for e in evs[:3]]))
+                + (f"<div style='font-size:12px;color:#666'>还有 {len(evs)-3} 项</div>" if len(evs) > 3 else "")
                 + "</div>",
                 unsafe_allow_html=True,
             )
@@ -2084,39 +2517,96 @@ elif page == "日历视图":
     st.divider()
     st.subheader("本月排班明细")
     rows = []
-    for s in filtered:
+    for s in merged_rows:
         rows.append(
             {
-                "ID": s.get("id"),
+                "来源": "已定直录" if s.get("source") == "direct" else "标准排班",
+                "记录ID": s.get("id"),
+                "任务ID": s.get("task_id"),
                 "项目": s.get("project_name") or "",
                 "城市": s.get("site_city") or "",
                 "角色": "组长" if s.get("role") == "leader" else "成员",
-                "稽查员": s.get("auditor_name") or "",
+                "人员": s.get("auditor_name") or "",
                 "开始日期": d2s(s.get("start_date")),
                 "结束日期": d2s(s.get("end_date")),
-                "路线": f"{s.get('travel_from_city')} → {s.get('travel_to_city')}",
-                "距离(km)": round(float(s.get("distance_km") or 0), 1),
             }
         )
     show_table(rows, 320)
-    if rows:
-        from openpyxl import Workbook
 
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "sheet1"
-        ws.append(list(rows[0].keys()))
-        for r in rows:
-            ws.append(list(r.values()))
-        bio = io.BytesIO()
-        wb.save(bio)
-        bio.seek(0)
-        st.download_button(
-            "导出本月排班明细（Excel）",
-            bio.getvalue(),
-            file_name=f"{APP_NAME}_{year}-{int(month):02d}_排班明细.xlsx",
-            key="export_month_excel",
-        )
+    st.divider()
+    st.subheader("修改已定项目人员明细")
+    direct_task_options = {}
+    with db_session() as db:
+        all_tasks = db.query(Task).order_by(Task.id.desc()).all()
+    for t in all_tasks:
+        if get_direct_assignments(int(t.id)):
+            direct_task_options[f"#{t.id} {t.project_name}｜{t.site_city}｜{d2s(t.start_date)}"] = int(t.id)
+
+    if direct_task_options:
+        dtask_label = st.selectbox("选择已定项目任务", list(direct_task_options.keys()), key="calendar_direct_task_select")
+        dtask_id = direct_task_options[dtask_label]
+        dtask = next((t for t in all_tasks if int(t.id) == int(dtask_id)), None)
+        existing = get_direct_assignments(int(dtask_id))
+        df = pd.DataFrame([
+            {
+                "类型": "兼职" if bool(r.get("is_part_time")) else "内部稽查员",
+                "人员姓名": r.get("person_name", ""),
+                "角色": "组长" if str(r.get("role")) == "leader" else "成员",
+                "开始日期": str(r.get("start_date")),
+                "结束日期": str(r.get("end_date")),
+                "备注": r.get("notes", "") or "",
+            }
+            for r in existing
+        ])
+        if df.empty:
+            df = pd.DataFrame(columns=["类型", "人员姓名", "角色", "开始日期", "结束日期", "备注"])
+
+        with st.form("calendar_direct_edit_form", clear_on_submit=False):
+            edited = st.data_editor(
+                df,
+                use_container_width=True,
+                hide_index=True,
+                num_rows="dynamic",
+                key="calendar_direct_edit_editor",
+                column_config={
+                    "类型": st.column_config.SelectboxColumn(options=["内部稽查员", "兼职"]),
+                    "角色": st.column_config.SelectboxColumn(options=["组长", "成员"]),
+                },
+            )
+            c1, c2 = st.columns(2)
+            save_direct_calendar = c1.form_submit_button("保存修改")
+            sync_direct_calendar = c2.form_submit_button("同步到排班", type="primary")
+
+        if save_direct_calendar or sync_direct_calendar:
+            with db_session() as db:
+                name_to_id = {a.name: a.id for a in db.query(Auditor).all()}
+            rows_to_save = []
+            for _, r in pd.DataFrame(edited).iterrows():
+                nm = str(r.get("人员姓名", "")).strip()
+                if not nm:
+                    continue
+                rows_to_save.append(
+                    {
+                        "auditor_id": None if str(r.get("类型", "")) == "兼职" else name_to_id.get(nm),
+                        "person_name": nm,
+                        "is_part_time": str(r.get("类型", "")) == "兼职",
+                        "role": "leader" if str(r.get("角色", "")) == "组长" else "member",
+                        "start_date": safe_parse_date(r.get("开始日期")),
+                        "end_date": safe_parse_date(r.get("结束日期")),
+                        "notes": str(r.get("备注", "")).strip(),
+                    }
+                )
+            replace_direct_assignments(int(dtask_id), rows_to_save)
+            if save_direct_calendar:
+                st.success("已保存已定项目人员明细")
+                st.rerun()
+            if sync_direct_calendar and dtask:
+                ok, msg = sync_task_schedules_from_direct_assignments(dtask)
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
 
     with db_session() as db:
         all_ics = build_ics_events(db)
@@ -2125,6 +2615,7 @@ elif page == "日历视图":
             one_ics = build_ics_events(db, auditor_id=auditor_id)
             st.download_button("导出当前稽查员 ICS 日历", one_ics, file_name=f"wnrh_auditor_{auditor_id}.ics", key="dl_one_ics")
 
+# -------------------- 账号管理 --------------------
 # -------------------- 账号管理 --------------------
 elif page == "账号管理":
     st.subheader("账号管理")
