@@ -326,6 +326,7 @@ def ensure_extra_tables():
                 role TEXT NOT NULL DEFAULT 'member',
                 start_date TEXT NOT NULL,
                 end_date TEXT NOT NULL,
+                project_name TEXT,
                 notes TEXT,
                 created_at TEXT
             )
@@ -360,6 +361,19 @@ def ensure_extra_tables():
                 UNIQUE(period_type, year, period_value)
             )
         """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS task_attributes (
+                task_id INTEGER PRIMARY KEY,
+                capital_type TEXT,
+                project_phase TEXT,
+                disease_area TEXT,
+                updated_at TEXT
+            )
+        """))
+        try:
+            conn.execute(text("ALTER TABLE direct_assignments ADD COLUMN project_name TEXT"))
+        except Exception:
+            pass
 
 
 def parse_name_list(raw) -> list[str]:
@@ -376,6 +390,38 @@ def parse_name_list(raw) -> list[str]:
             seen.add(x)
             out.append(x)
     return out
+
+
+def get_task_attribute_map(task_ids: list[int] | None = None) -> dict[int, dict]:
+    globals().get("ensure_extra_tables", lambda: None)()
+    sql = "SELECT task_id, capital_type, project_phase, disease_area FROM task_attributes"
+    params = {}
+    if task_ids:
+        sql += " WHERE task_id IN ({})".format(",".join([f":id{i}" for i, _ in enumerate(task_ids)]))
+        params = {f"id{i}": int(v) for i, v in enumerate(task_ids)}
+    with engine.begin() as conn:
+        rows = conn.execute(text(sql), params).mappings().all()
+    return {int(r["task_id"]): dict(r) for r in rows}
+
+
+def get_task_attributes(task_id: int) -> dict:
+    mp = get_task_attribute_map([int(task_id)])
+    return mp.get(int(task_id), {"task_id": int(task_id), "capital_type": "", "project_phase": "", "disease_area": ""})
+
+
+def save_task_attributes(task_id: int, capital_type: str = "", project_phase: str = "", disease_area: str = ""):
+    globals().get("ensure_extra_tables", lambda: None)()
+    params = {
+        "task_id": int(task_id),
+        "capital_type": normalize_text(capital_type) or None,
+        "project_phase": normalize_text(project_phase) or None,
+        "disease_area": normalize_text(disease_area) or None,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    with engine.begin() as conn:
+        updated = conn.execute(text("UPDATE task_attributes SET capital_type=:capital_type, project_phase=:project_phase, disease_area=:disease_area, updated_at=:updated_at WHERE task_id=:task_id"), params)
+        if getattr(updated, "rowcount", 0) == 0:
+            conn.execute(text("INSERT INTO task_attributes (task_id, capital_type, project_phase, disease_area, updated_at) VALUES (:task_id, :capital_type, :project_phase, :disease_area, :updated_at)"), params)
 
 
 def load_day_marks() -> list[dict]:
@@ -430,7 +476,7 @@ def get_direct_assignments(task_id: int) -> list[dict]:
     globals().get("ensure_extra_tables", lambda: None)()
     with engine.begin() as conn:
         rows = conn.execute(text("""
-            SELECT id, task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, notes, created_at
+            SELECT id, task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, project_name, notes, created_at
             FROM direct_assignments
             WHERE task_id = :task_id
             ORDER BY CASE WHEN role='leader' THEN 0 ELSE 1 END, start_date ASC, person_name ASC
@@ -458,8 +504,8 @@ def replace_direct_assignments(task_id: int, rows: list[dict]):
             if ed < sd:
                 ed = sd
             conn.execute(text("""
-                INSERT INTO direct_assignments (task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, notes, created_at)
-                VALUES (:task_id, :auditor_id, :person_name, :is_part_time, :role, :start_date, :end_date, :notes, :created_at)
+                INSERT INTO direct_assignments (task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, project_name, notes, created_at)
+                VALUES (:task_id, :auditor_id, :person_name, :is_part_time, :role, :start_date, :end_date, :project_name, :notes, :created_at)
             """), {
                 'task_id': int(task_id),
                 'auditor_id': int(r['auditor_id']) if r.get('auditor_id') else None,
@@ -468,6 +514,7 @@ def replace_direct_assignments(task_id: int, rows: list[dict]):
                 'role': 'leader' if str(r.get('role')) == 'leader' else 'member',
                 'start_date': d2s(sd),
                 'end_date': d2s(ed),
+                'project_name': normalize_text(r.get('project_name')) or None,
                 'notes': normalize_text(r.get('notes')) or None,
                 'created_at': now,
             })
@@ -495,6 +542,7 @@ def save_direct_assignments_from_df(task_id: int, df_in):
             'role': 'leader' if normalize_text(r.get('角色')) == '组长' else 'member',
             'start_date': sd,
             'end_date': ed,
+            'project_name': normalize_text(r.get('项目名称')) or normalize_text(task.project_name),
             'notes': normalize_text(r.get('备注')),
         })
     replace_direct_assignments(int(task_id), rows_out)
@@ -539,6 +587,11 @@ def sync_task_schedules_from_direct_assignments(task: Task):
 def _get_period_range(period_type: str, year: int, period_value: int):
     year = int(year)
     period_value = int(period_value or 0)
+    if period_type == 'weekly':
+        from datetime import datetime as _dt
+        start_d = _dt.fromisocalendar(year, max(1, min(53, period_value)), 1).date()
+        end_d = _dt.fromisocalendar(year, max(1, min(53, period_value)), 7).date()
+        return start_d, end_d
     if period_type == 'monthly':
         start_d = date(year, max(1, min(12, period_value)), 1)
         end_d = ((start_d.replace(day=28) + timedelta(days=4)).replace(day=1)) - timedelta(days=1)
@@ -570,35 +623,46 @@ def save_target_row(period_type: str, year: int, period_value: int, target_proje
         'target_projects': int(target_projects or 0), 'target_staffing': int(target_staffing or 0),
         'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     }
+    update_sql = text("UPDATE progress_targets SET target_projects=:target_projects, target_staffing=:target_staffing, updated_at=:updated_at WHERE period_type=:period_type AND year=:year AND period_value=:period_value")
+    insert_sql = text("INSERT INTO progress_targets (period_type, year, period_value, target_projects, target_staffing, updated_at) VALUES (:period_type, :year, :period_value, :target_projects, :target_staffing, :updated_at)")
+    from sqlalchemy.exc import IntegrityError
     with engine.begin() as conn:
-        existing = conn.execute(text("SELECT id FROM progress_targets WHERE period_type=:period_type AND year=:year AND period_value=:period_value"), params).mappings().first()
-        if existing:
-            conn.execute(text("UPDATE progress_targets SET target_projects=:target_projects, target_staffing=:target_staffing, updated_at=:updated_at WHERE period_type=:period_type AND year=:year AND period_value=:period_value"), params)
-        else:
-            conn.execute(text("INSERT INTO progress_targets (period_type, year, period_value, target_projects, target_staffing, updated_at) VALUES (:period_type, :year, :period_value, :target_projects, :target_staffing, :updated_at)"), params)
+        try:
+            existing = conn.execute(text("SELECT id FROM progress_targets WHERE period_type=:period_type AND year=:year AND period_value=:period_value"), params).mappings().first()
+            if existing:
+                conn.execute(update_sql, params)
+            else:
+                conn.execute(insert_sql, params)
+        except IntegrityError:
+            conn.execute(update_sql, params)
 
 
 def get_progress_stats(period_type: str, year: int, period_value: int):
     start_d, end_d = _get_period_range(period_type, year, period_value)
     with db_session() as db:
         tasks = db.query(Task).filter(Task.start_date >= start_d, Task.start_date <= end_d).order_by(Task.start_date.asc(), Task.id.asc()).all()
-        schedules = db.query(Schedule).filter(Schedule.start_date >= start_d, Schedule.start_date <= end_d).all()
+        schedules = db.query(Schedule).filter(Schedule.start_date <= end_d, Schedule.end_date >= start_d).all()
         actual_projects = len({int(t.id) for t in tasks})
         actual_staffing = len(schedules)
         staffing_map = {}
         for s in schedules:
             staffing_map[int(s.task_id)] = staffing_map.get(int(s.task_id), 0) + 1
+        attr_map = get_task_attribute_map([int(t.id) for t in tasks]) if tasks else {}
         detail_rows = []
         for t in tasks:
+            extra = attr_map.get(int(t.id), {})
             detail_rows.append({
                 '任务ID': int(t.id),
                 '项目名称': t.project_name or '',
                 '客户': t.customer_name or '',
+                '属性': extra.get('capital_type') or '',
+                '分期': extra.get('project_phase') or '',
+                '疾病领域': extra.get('disease_area') or '',
                 '城市': t.site_city or '',
                 '开始日期': d2s(t.start_date),
                 '结束日期': d2s(t.end_date or t.start_date),
-                '项目完成数': 1,
-                '人员安排数': int(staffing_map.get(int(t.id), 0)),
+                '已完成院次': 1,
+                '已安排人数': int(staffing_map.get(int(t.id), 0)),
                 '需求人数': int(t.required_headcount or 0),
                 '需求天数': int(t.required_days or 0),
             })
@@ -1223,6 +1287,9 @@ def update_task_record(
     site_city: str,
     start_date_value,
     end_date_value,
+    capital_type: str = "",
+    project_phase: str = "",
+    disease_area: str = "",
 ):
     with db_session() as db:
         obj = db.query(Task).filter(Task.id == int(task_id)).first()
@@ -1276,7 +1343,10 @@ def update_task_record(
             s.end_date = ed
             s.travel_to_city = obj.site_city
 
-        return safe_commit(db, f"更新任务#{task_id}")
+        ok = safe_commit(db, f"更新任务#{task_id}")
+        if ok:
+            save_task_attributes(int(task_id), capital_type=capital_type, project_phase=project_phase, disease_area=disease_area)
+        return ok
 
 
 def delete_task_record(task_id: int):
@@ -1565,7 +1635,24 @@ page = st.sidebar.radio(
     label_visibility="collapsed",
 )
 
+PAGE_SUBTITLES = {
+    "智能排班": "按任务条件推荐团队，并支持确认排班。",
+    "批量排班": "批量为任务生成推荐并快速落库。",
+    "稽查员管理": "维护稽查员基础信息、负荷与带队能力。",
+    "任务管理": "维护项目任务、已定人员与直录排班。",
+    "指标统计": "按周/月/季/年统计院次、人员效率与项目结构。",
+    "兼职库": "维护不参与自动推荐的兼职人员名单。",
+    "城市距离": "维护出发地与目的地距离数据。",
+    "城市坐标": "维护城市坐标，供距离自动计算。",
+    "模板导入": "批量导入稽查员、任务、城市等基础数据。",
+    "日历视图": "查看月度排班日历、排班明细与导出日历。",
+    "账号管理": "维护登录账号、密码与板块权限。",
+    "数据清理": "清理测试数据与异常记录。",
+}
+
 st.title(f"{APP_NAME}｜{page}")
+st.caption(PAGE_SUBTITLES.get(page, ""))
+st.sidebar.caption(f"当前位置：{page}")
 
 if (not is_admin) and (page not in allowed_pages):
     st.error("当前账号无权限访问该板块，请联系主管理员开通。")
@@ -1882,6 +1969,10 @@ elif page == "任务管理":
         specified = c8.text_input("硬指定人员（可空，支持 ，、分隔）")
         preferred = c9.text_input("软指定专家/老师（可空）")
         start_date = c10.date_input("开始日期*", value=date.today())
+        c11, c12, c13 = st.columns(3)
+        capital_type = c11.selectbox("项目属性", ["", "内资", "外资"])
+        project_phase = c12.text_input("项目分期（如 I/II/III/BE）")
+        disease_area = c13.text_input("疾病领域")
         default_end = start_date + timedelta(days=max(1, int(required_days)) - 1)
         end_date = st.date_input("结束日期*", value=default_end)
 
@@ -1892,23 +1983,23 @@ elif page == "任务管理":
                 st.error("结束日期不能早于开始日期。")
             else:
                 with db_session() as db:
-                    db.add(
-                        Task(
-                            project_name=project_name.strip(),
-                            customer_name=customer_name.strip() or None,
-                            need_expert=(need_expert == "是"),
-                            required_headcount=int(required_headcount),
-                            required_days=int(required_days),
-                            required_gender=required_gender,
-                            specified_auditors=specified.strip() or None,
-                            preferred_experts=preferred.strip() or None,
-                            site_city=site_city.strip(),
-                            start_date=start_date,
-                            end_date=end_date,
-                        )
+                    obj = Task(
+                        project_name=project_name.strip(),
+                        customer_name=customer_name.strip() or None,
+                        need_expert=(need_expert == "是"),
+                        required_headcount=int(required_headcount),
+                        required_days=int(required_days),
+                        required_gender=required_gender,
+                        specified_auditors=specified.strip() or None,
+                        preferred_experts=preferred.strip() or None,
+                        site_city=site_city.strip(),
+                        start_date=start_date,
+                        end_date=end_date,
                     )
+                    db.add(obj)
                     if not safe_commit(db, context=f"新增任务：{project_name.strip()}"):
                         st.stop()
+                    save_task_attributes(int(obj.id), capital_type=capital_type, project_phase=project_phase, disease_area=disease_area)
                 clear_runtime_caches_after_data_change()
                 st.success("已新增")
                 st.rerun()
@@ -1917,13 +2008,18 @@ elif page == "任务管理":
         tasks = db.query(Task).order_by(Task.id.desc()).all()
         auditors = db.query(Auditor).order_by(Auditor.name.asc()).all()
 
+    attr_map = get_task_attribute_map([int(t.id) for t in tasks]) if tasks else {}
     rows = []
     for t in tasks:
+        extra = attr_map.get(int(t.id), {})
         rows.append(
             {
                 "ID": t.id,
                 "项目": t.project_name,
                 "客户": t.customer_name or "",
+                "属性": extra.get("capital_type") or "",
+                "分期": extra.get("project_phase") or "",
+                "疾病领域": extra.get("disease_area") or "",
                 "需要A": "是" if t.need_expert else "否",
                 "人数": t.required_headcount,
                 "天数": t.required_days,
@@ -1948,6 +2044,7 @@ elif page == "任务管理":
         selected_task = next((t for t in tasks if t.id == selected_task_id), None)
 
         if selected_task:
+            selected_task_attrs = get_task_attributes(int(selected_task.id))
             st.divider()
             st.subheader(f"编辑任务 #{selected_task.id}")
 
@@ -1971,6 +2068,10 @@ elif page == "任务管理":
                 edit_specified = c8.text_input("硬指定人员（可空）", value=selected_task.specified_auditors or "")
                 edit_preferred = c9.text_input("软指定专家/老师（可空）", value=selected_task.preferred_experts or "")
                 edit_start_date = c10.date_input("开始日期*", value=selected_task.start_date or date.today())
+                c11, c12, c13 = st.columns(3)
+                edit_capital_type = c11.selectbox("项目属性", ["", "内资", "外资"], index=["", "内资", "外资"].index((selected_task_attrs.get("capital_type") or "") if (selected_task_attrs.get("capital_type") or "") in ["", "内资", "外资"] else ""))
+                edit_project_phase = c12.text_input("项目分期", value=selected_task_attrs.get("project_phase") or "")
+                edit_disease_area = c13.text_input("疾病领域", value=selected_task_attrs.get("disease_area") or "")
                 edit_end_date = st.date_input("结束日期*", value=selected_task.end_date or edit_start_date)
 
                 b1, b2 = st.columns(2)
@@ -1991,6 +2092,9 @@ elif page == "任务管理":
                     site_city=edit_site_city,
                     start_date_value=edit_start_date,
                     end_date_value=edit_end_date,
+                    capital_type=edit_capital_type,
+                    project_phase=edit_project_phase,
+                    disease_area=edit_disease_area,
                 )
                 if ok:
                     clear_runtime_caches_after_data_change()
@@ -2017,6 +2121,7 @@ elif page == "任务管理":
             if existing_direct:
                 direct_df = pd.DataFrame([
                     {
+                        "项目名称": r.get("project_name", "") or (selected_task.project_name or ""),
                         "类型": "兼职" if bool(r.get("is_part_time")) else "内部稽查员",
                         "人员姓名": r.get("person_name", ""),
                         "角色": "组长" if str(r.get("role", "")) == "leader" else "成员",
@@ -2031,6 +2136,7 @@ elif page == "任务管理":
                 if default_names:
                     direct_df = pd.DataFrame([
                         {
+                            "项目名称": selected_task.project_name or "",
                             "类型": "内部稽查员" if nm in auditor_name_to_id else "兼职",
                             "人员姓名": nm,
                             "角色": "成员",
@@ -2041,7 +2147,7 @@ elif page == "任务管理":
                         for nm in default_names
                     ])
                 else:
-                    direct_df = pd.DataFrame(columns=["类型", "人员姓名", "角色", "开始日期", "结束日期", "备注"])
+                    direct_df = pd.DataFrame(columns=["项目名称", "类型", "人员姓名", "角色", "开始日期", "结束日期", "备注"])
 
             with st.form("direct_assign_form", clear_on_submit=False):
                 edited_direct = st.data_editor(
@@ -2051,6 +2157,7 @@ elif page == "任务管理":
                     num_rows="dynamic",
                     key=f"direct_assign_editor_{selected_task.id}",
                     column_config={
+                        "项目名称": st.column_config.TextColumn(disabled=True),
                         "类型": st.column_config.SelectboxColumn(options=["内部稽查员", "兼职"]),
                         "人员姓名": st.column_config.TextColumn(help="内部稽查员可填写系统内姓名；兼职可填写兼职库姓名"),
                         "角色": st.column_config.SelectboxColumn(options=["组长", "成员"]),
@@ -2083,6 +2190,7 @@ elif page == "任务管理":
                             "role": role,
                             "start_date": sd,
                             "end_date": ed,
+                            "project_name": normalize_text(r.get("项目名称")) or normalize_text(selected_task.project_name),
                             "notes": str(r.get("备注", "")).strip(),
                         }
                     )
@@ -2112,12 +2220,14 @@ elif page == "任务管理":
 # -------------------- 页面：指标统计 --------------------
 elif page == "指标统计":
     st.subheader("指标统计")
-    st.caption("支持录入月度、季度、年度项目/人员安排指标，并结合系统数据自动计算完成进度。")
+    st.caption("按周、月、季、年录入目标院次，并自动统计完成院次、完成率、稽查员出差/空闲/超负荷情况，以及项目属性分布。")
 
     c1, c2, c3 = st.columns(3)
-    period_type = c1.selectbox("统计周期", ["monthly", "quarterly", "yearly"], format_func=lambda x: {"monthly":"月度","quarterly":"季度","yearly":"年度"}[x])
+    period_type = c1.selectbox("统计周期", ["weekly", "monthly", "quarterly", "yearly"], format_func=lambda x: {"weekly":"周度","monthly":"月度","quarterly":"季度","yearly":"年度"}[x])
     year = c2.number_input("年份", min_value=2024, max_value=2035, value=date.today().year, step=1)
-    if period_type == "monthly":
+    if period_type == "weekly":
+        period_value = c3.selectbox("周次", list(range(1, 54)), index=max(0, min(52, date.today().isocalendar().week - 1)))
+    elif period_type == "monthly":
         period_value = c3.selectbox("月份", list(range(1, 13)), index=max(0, date.today().month - 1))
     elif period_type == "quarterly":
         period_value = c3.selectbox("季度", [1, 2, 3, 4], index=(date.today().month - 1)//3)
@@ -2127,32 +2237,107 @@ elif page == "指标统计":
 
     target = get_target_row(period_type, int(year), int(period_value))
     with st.form("target_form", clear_on_submit=False):
-        c1, c2 = st.columns(2)
-        target_projects = c1.number_input("项目指标数量", min_value=0, value=int(target.get("target_projects", 0) or 0), step=1)
-        target_staffing = c2.number_input("人员安排指标数量", min_value=0, value=int(target.get("target_staffing", 0) or 0), step=1)
-        if st.form_submit_button("保存指标", type="primary"):
-            save_target_row(period_type, int(year), int(period_value), int(target_projects), int(target_staffing))
-            st.success("指标已保存")
+        target_projects = st.number_input("目标院次数量", min_value=0, value=int(target.get("target_projects", 0) or 0), step=1)
+        if st.form_submit_button("保存院次指标", type="primary"):
+            save_target_row(period_type, int(year), int(period_value), int(target_projects), 0)
+            st.success("院次指标已保存")
             st.rerun()
 
-    start_d, end_d, actual_projects, actual_staffing, detail_rows = get_progress_stats(period_type, int(year), int(period_value))
+    start_d, end_d, actual_visits, _, detail_rows = get_progress_stats(period_type, int(year), int(period_value))
     target = get_target_row(period_type, int(year), int(period_value))
-    t_projects = int(target.get("target_projects", 0) or 0)
-    t_staff = int(target.get("target_staffing", 0) or 0)
+    t_visits = int(target.get("target_projects", 0) or 0)
+    completion_pct = round(actual_visits / t_visits * 100, 1) if t_visits else 0.0
 
     summary_df = pd.DataFrame([
-        {"指标": "项目完成数", "目标": t_projects, "实际": actual_projects, "完成率": f"{round(actual_projects / t_projects * 100, 1) if t_projects else 0.0}%"},
-        {"指标": "人员安排数", "目标": t_staff, "实际": actual_staffing, "完成率": f"{round(actual_staffing / t_staff * 100, 1) if t_staff else 0.0}%"},
+        {"指标": "目标院次", "数值": t_visits},
+        {"指标": "已完成院次", "数值": actual_visits},
+        {"指标": "完成率", "数值": completion_pct},
     ])
     st.write(f"统计区间：{d2s(start_d)} ~ {d2s(end_d)}")
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
-    st.bar_chart(summary_df.set_index("指标")[["目标", "实际"]])
 
-    st.subheader("项目完成进度及人员安排进度明细")
+    colx, coly, colz = st.columns(3)
+    colx.metric("目标院次", t_visits)
+    coly.metric("已完成院次", actual_visits)
+    colz.metric("完成率", f"{completion_pct}%")
+
+    st.subheader("院次完成明细")
     if detail_rows:
         st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
     else:
         st.info("该统计区间暂无项目数据")
+
+    with db_session() as db:
+        schedules = db.query(Schedule).filter(Schedule.start_date <= end_d, Schedule.end_date >= start_d).all()
+        auditors = db.query(Auditor).order_by(Auditor.name.asc()).all()
+        tasks = db.query(Task).filter(Task.start_date >= start_d, Task.start_date <= end_d).all()
+
+    auditor_rows = []
+    total_days = max(1, (end_d - start_d).days + 1)
+    task_by_id = {int(t.id): t for t in tasks}
+    for a in auditors:
+        related = [s for s in schedules if int(s.auditor_id) == int(a.id)]
+        day_set = set()
+        task_ids = set()
+        for srec in related:
+            sd = max(start_d, srec.start_date)
+            ed = min(end_d, srec.end_date or srec.start_date)
+            cur = sd
+            while cur <= ed:
+                day_set.add(cur)
+                cur += timedelta(days=1)
+            task_ids.add(int(srec.task_id))
+        travel_days = len(day_set)
+        idle_days = max(0, total_days - travel_days)
+        completed_visits = len(task_ids)
+        monthly_capacity = int(getattr(a, "monthly_cases", 0) or 0)
+        if period_type == "weekly":
+            capacity = round(monthly_capacity / 4, 2)
+        elif period_type == "monthly":
+            capacity = monthly_capacity
+        elif period_type == "quarterly":
+            capacity = monthly_capacity * 3
+        else:
+            capacity = monthly_capacity * 12
+        overload_pct = round(max(0.0, (completed_visits - capacity) / capacity * 100), 1) if capacity else 0.0
+        auditor_rows.append({
+            "稽查员": a.name,
+            "已完成院次": completed_visits,
+            "出差天数": travel_days,
+            "空闲天数": idle_days,
+            "超负荷百分比": f"{overload_pct}%",
+            "参考容量": capacity,
+        })
+
+    st.subheader("稽查员效率统计")
+    if auditor_rows:
+        st.dataframe(pd.DataFrame(auditor_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("暂无稽查员统计数据")
+
+    attr_map = get_task_attribute_map([int(t.id) for t in tasks]) if tasks else {}
+    def _dist_frame(key_name):
+        counter = {}
+        for t in tasks:
+            v = (attr_map.get(int(t.id), {}) or {}).get(key_name) or "未填写"
+            counter[v] = counter.get(v, 0) + 1
+        if not counter:
+            return pd.DataFrame(columns=[key_name, "院次", "占比"])
+        total = sum(counter.values()) or 1
+        rows = [{key_name: k, "院次": v, "占比": f"{round(v / total * 100, 1)}%"} for k, v in sorted(counter.items(), key=lambda x: (-x[1], x[0]))]
+        return pd.DataFrame(rows)
+
+    st.subheader("项目结构实时分析")
+    ca, cb, cc = st.columns(3)
+    with ca:
+        st.markdown("**内资/外资占比**")
+        st.dataframe(_dist_frame("capital_type"), use_container_width=True, hide_index=True)
+    with cb:
+        st.markdown("**项目分期占比**")
+        st.dataframe(_dist_frame("project_phase"), use_container_width=True, hide_index=True)
+    with cc:
+        st.markdown("**疾病领域占比**")
+        st.dataframe(_dist_frame("disease_area"), use_container_width=True, hide_index=True)
 
 # -------------------- 页面：兼职库 --------------------
 elif page == "兼职库":
