@@ -204,6 +204,7 @@ def safe_commit(db: Session, context: str = "") -> bool:
         return False
 
 
+
 def clear_runtime_caches_after_data_change():
     for k in [
         "recommend_result",
@@ -215,6 +216,167 @@ def clear_runtime_caches_after_data_change():
     ]:
         if k in st.session_state:
             st.session_state.pop(k, None)
+
+    for fn_name in [
+        "get_tasks_cached",
+        "get_recent_schedules_cached",
+        "get_auditor_rows_cached",
+        "get_task_rows_cached",
+        "get_month_schedules_cached",
+        "get_auditors_for_calendar_cached",
+    ]:
+        fn = globals().get(fn_name)
+        if fn and hasattr(fn, "clear"):
+            try:
+                fn.clear()
+            except Exception:
+                pass
+
+
+@st.cache_data(ttl=30)
+def get_tasks_cached():
+    with db_session() as db:
+        rows = []
+        for t in db.query(Task).order_by(Task.id.desc()).all():
+            rows.append(
+                {
+                    "id": t.id,
+                    "project_name": t.project_name,
+                    "customer_name": t.customer_name,
+                    "need_expert": bool(t.need_expert),
+                    "required_headcount": int(t.required_headcount or 1),
+                    "required_days": int(t.required_days or 1),
+                    "required_gender": t.required_gender,
+                    "specified_auditors": t.specified_auditors,
+                    "preferred_experts": t.preferred_experts,
+                    "site_city": t.site_city,
+                    "start_date": t.start_date,
+                    "end_date": t.end_date,
+                }
+            )
+        return rows
+
+
+@st.cache_data(ttl=20)
+def get_recent_schedules_cached(limit: int = 120):
+    with db_session() as db:
+        schedules_recent = (
+            db.query(Schedule)
+            .options(joinedload(Schedule.task), joinedload(Schedule.auditor))
+            .order_by(Schedule.id.desc())
+            .limit(limit)
+            .all()
+        )
+        rows = []
+        for s in schedules_recent:
+            rows.append(
+                {
+                    "ID": s.id,
+                    "任务": f"#{s.task_id} {(s.task.project_name if s.task else '')}",
+                    "人员": f"#{s.auditor_id} {(s.auditor.name if s.auditor else '')} ({(s.auditor.group_level if s.auditor else '')})",
+                    "角色": s.role,
+                    "时间": f"{d2s(s.start_date)} ~ {d2s(s.end_date)}",
+                    "路线": f"{s.travel_from_city} → {s.travel_to_city}",
+                    "km": round(float(s.distance_km or 0), 1),
+                }
+            )
+        return rows
+
+
+@st.cache_data(ttl=30)
+def get_auditor_rows_cached():
+    with db_session() as db:
+        rows = []
+        for a in db.query(Auditor).order_by(Auditor.id.desc()).all():
+            rows.append(
+                {
+                    "ID": a.id,
+                    "姓名": a.name,
+                    "性别": a.gender,
+                    "等级": a.group_level,
+                    "可带队": "是" if a.can_lead_team else "否",
+                    "常驻城市": a.base_city,
+                    "周上限": a.max_weekly_tasks,
+                    "状态": STATUS_MAP_REV.get(a.status, a.status),
+                    "本月院次": a.monthly_cases,
+                    "差旅天数": a.travel_days,
+                    "连续天数": a.continuous_days,
+                    "上次结束城市": a.last_task_end_city or "",
+                    "上次结束日期": d2s(a.last_task_end_date),
+                }
+            )
+        return rows
+
+
+@st.cache_data(ttl=30)
+def get_task_rows_cached():
+    with db_session() as db:
+        rows = []
+        for t in db.query(Task).order_by(Task.id.desc()).all():
+            rows.append(
+                {
+                    "ID": t.id,
+                    "项目": t.project_name,
+                    "客户": t.customer_name or "",
+                    "需要A": "是" if t.need_expert else "否",
+                    "人数": t.required_headcount,
+                    "天数": t.required_days,
+                    "性别": t.required_gender,
+                    "硬指定": t.specified_auditors or "",
+                    "软指定": t.preferred_experts or "",
+                    "城市": t.site_city,
+                    "开始": d2s(t.start_date),
+                    "结束": d2s(t.end_date),
+                }
+            )
+        return rows
+
+
+@st.cache_data(ttl=20)
+def get_auditors_for_calendar_cached():
+    with db_session() as db:
+        return [{"id": a.id, "name": a.name} for a in db.query(Auditor).order_by(Auditor.name.asc()).all()]
+
+
+@st.cache_data(ttl=20)
+def get_month_schedules_cached(year: int, month: int):
+    month_start = date(int(year), int(month), 1)
+    next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    month_end = next_month - timedelta(days=1)
+
+    with db_session() as db:
+        all_schedules = (
+            db.query(Schedule)
+            .options(joinedload(Schedule.task), joinedload(Schedule.auditor))
+            .filter(Schedule.start_date <= month_end, Schedule.end_date >= month_start)
+            .order_by(Schedule.start_date.asc())
+            .all()
+        )
+
+        rows = []
+        seen_day_task = set()
+        for s in all_schedules:
+            uniq = (s.task_id, s.auditor_id, s.start_date, s.end_date)
+            if uniq in seen_day_task:
+                continue
+            seen_day_task.add(uniq)
+            rows.append(
+                {
+                    "id": s.id,
+                    "auditor_id": s.auditor_id,
+                    "auditor_name": (s.auditor.name if s.auditor else ""),
+                    "task_id": s.task_id,
+                    "project_name": (s.task.project_name if s.task else ""),
+                    "site_city": (s.task.site_city if s.task else ""),
+                    "role": s.role,
+                    "start_date": s.start_date,
+                    "end_date": s.end_date,
+                    "travel_from_city": s.travel_from_city,
+                    "travel_to_city": s.travel_to_city,
+                    "distance_km": float(s.distance_km or 0),
+                }
+            )
+        return rows
 
 
 def _safe_int(x, default=None):
@@ -242,120 +404,28 @@ def normalize_text(v) -> str:
     return str(v).strip()
 
 
-def parse_names(raw) -> list[str]:
-    s = normalize_text(raw)
-    if not s:
-        return []
-    for sep in ["，", "、", ";", "；", "/", "|"]:
-        s = s.replace(sep, ",")
-    return [x.strip() for x in s.split(",") if x.strip()]
-
-
-def build_direct_assignment_plan(task: Task, auditors: list[Auditor]):
-    """
-    直录模式：
-    - 当硬指定人数 == 任务人数时，不走推荐，直接按指定人员录入
-    - 当 need_expert=True 时，负责人必须在指定人员中且为 A 且可带队
-    - 当 need_expert=False 时，负责人只需在指定人员中可带队
-    """
-    specified_names = parse_names(getattr(task, "specified_auditors", None))
-    if not specified_names:
-        return None, "未填写硬指定人员"
-    required_headcount = max(1, int(getattr(task, "required_headcount", 1) or 1))
-    if len(specified_names) != required_headcount:
-        return None, "硬指定人数与任务人数不一致，不能直录"
-
-    auditor_by_name = {}
-    for a in auditors:
-        auditor_by_name[normalize_text(getattr(a, "name", ""))] = a
-
-    selected_auditors = []
-    missing = []
-    for name in specified_names:
-        a = auditor_by_name.get(name)
-        if not a:
-            missing.append(name)
-        else:
-            selected_auditors.append(a)
-
-    if missing:
-        return None, f"未找到以下硬指定人员：{', '.join(missing)}"
-
-    task_start = task.start_date
-    task_end = task.end_date or (task.start_date + timedelta(days=max(1, int(task.required_days or 1)) - 1))
-
-    leader = None
-    if bool(getattr(task, "need_expert", False)):
-        for a in selected_auditors:
-            if bool(getattr(a, "can_lead_team", False)) and normalize_text(getattr(a, "group_level", "")) == "A":
-                leader = a
-                break
-        if leader is None:
-            return None, "硬指定人员中没有满足“A且可带队”的负责人，无法直录"
-    else:
-        for a in selected_auditors:
-            if bool(getattr(a, "can_lead_team", False)):
-                leader = a
-                break
-        if leader is None:
-            return None, "硬指定人员中没有可带队负责人，无法直录"
-
-    with db_session() as db:
-        existing_schedules = db.query(Schedule).all()
-
-    for a in selected_auditors:
-        if normalize_text(getattr(a, "status", "active")) != "active":
-            return None, f"{a.name} 当前不在岗，无法直录"
-
-        last_date = getattr(a, "last_task_end_date", None)
-        if last_date and last_date >= task_start:
-            return None, f"{a.name} 的上次结束日期与本次开始日期冲突"
-
-        max_weekly_tasks = int(getattr(a, "max_weekly_tasks", 1) or 1)
-        week_count = 0
-        for s in existing_schedules:
-            if int(getattr(s, "auditor_id")) != int(getattr(a, "id")):
-                continue
-            s_start = getattr(s, "start_date", None)
-            if s_start and s_start.isocalendar()[:2] == task_start.isocalendar()[:2]:
-                week_count += 1
-            s_end = getattr(s, "end_date", None) or s_start
-            if s_start and s_end and not (task_end < s_start or s_end < task_start):
-                return None, f"{a.name} 与已有任务时间冲突，无法直录"
-        if week_count >= max_weekly_tasks:
-            return None, f"{a.name} 已达本周上限，无法直录"
-
-    member_ids = [int(getattr(a, "id")) for a in selected_auditors if int(getattr(a, "id")) != int(getattr(leader, "id"))]
-    plan = {
-        "leader_id": int(getattr(leader, "id")),
-        "leader_name": normalize_text(getattr(leader, "name", "")),
-        "member_ids": member_ids,
-        "member_names": [normalize_text(getattr(a, "name", "")) for a in selected_auditors if int(getattr(a, "id")) != int(getattr(leader, "id"))],
-        "all_names": [normalize_text(getattr(a, "name", "")) for a in selected_auditors],
-    }
-    return plan, None
-
 
 def seed_city_distances_if_needed(db: Session):
+    # 云端数据库下，若已有数据，直接跳过，避免每次启动逐条查询导致卡顿
+    try:
+        if db.query(CityDistance).count() > 0:
+            return
+    except Exception:
+        return
+
     seen = set()
     for a, b, km in SEED_CITY_DISTANCES:
         a = str(a).strip()
         b = str(b).strip()
         if not a or not b or a == b:
             continue
+
         key = (a, b)
         if key in seen:
             continue
         seen.add(key)
-        exists = db.query(CityDistance).filter(CityDistance.from_city == a, CityDistance.to_city == b).first()
-        if exists:
-            continue
         db.add(CityDistance(from_city=a, to_city=b, km=float(km)))
-        try:
-            db.flush()
-        except IntegrityError:
-            db.rollback()
-            continue
+
     safe_commit(db, "初始化城市距离")
 
 
@@ -363,24 +433,29 @@ SEED_CITIES = [(name, latlon[0], latlon[1]) for name, latlon in CITY_COORDS.item
 
 
 def seed_cities_if_needed(db: Session):
-    if db.query(City).count() > 0:
+    try:
+        if db.query(City).count() > 0:
+            return
+    except Exception:
         return
+
     for name, lat, lon in SEED_CITIES:
         nm = str(name).strip()
         if not nm:
             continue
         db.add(City(name=nm, lat=float(lat), lon=float(lon)))
-        try:
-            db.flush()
-        except IntegrityError:
-            db.rollback()
-            continue
+
     safe_commit(db, "初始化城市坐标")
 
 
-with db_session() as db:
-    seed_city_distances_if_needed(db)
-    seed_cities_if_needed(db)
+@st.cache_resource
+def init_reference_data():
+    with db_session() as db:
+        seed_city_distances_if_needed(db)
+        seed_cities_if_needed(db)
+
+
+init_reference_data()
 
 # -------------------- 权限 --------------------
 ALL_PAGES = [
@@ -400,6 +475,7 @@ DEFAULT_NORMAL_PAGES = ["任务管理", "稽查员管理", "日历视图"]
 
 def hash_password(password: str) -> str:
     return hashlib.sha256(str(password).encode("utf-8")).hexdigest()
+
 
 
 def ensure_auth_table():
@@ -964,7 +1040,13 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
     report = {"assigned": [], "skipped": [], "batch_week_counts": {}}
 
     for t in tasks:
-        schedules_all = db.query(Schedule).all()
+        task_start = t.start_date
+        task_end = t.end_date or (t.start_date + timedelta(days=max(1, int(t.required_days or 1)) - 1))
+        schedules_all = (
+            db.query(Schedule)
+            .filter(Schedule.start_date <= task_end, Schedule.end_date >= task_start)
+            .all()
+        )
         candidates = build_candidates(db, t, auditors, schedules_all)
         team = propose_team(t, candidates)
 
@@ -1096,28 +1178,12 @@ if page == "智能排班":
     st.subheader("智能排班")
     st.caption("先按硬约束筛选，再按距离优先 + 适度负荷均衡评分推荐。")
 
-    with db_session() as db:
-        tasks = db.query(Task).order_by(Task.id.desc()).all()
-        schedules_recent = (
-            db.query(Schedule)
-            .options(joinedload(Schedule.task), joinedload(Schedule.auditor))
-            .order_by(Schedule.id.desc())
-            .limit(120)
-            .all()
-        )
-        schedules_recent_rows = []
-        for s in schedules_recent:
-            schedules_recent_rows.append(
-                {
-                    "ID": s.id,
-                    "任务": f"#{s.task_id} {(s.task.project_name if s.task else '')}",
-                    "人员": f"#{s.auditor_id} {(s.auditor.name if s.auditor else '')} ({(s.auditor.group_level if s.auditor else '')})",
-                    "角色": s.role,
-                    "时间": f"{d2s(s.start_date)} ~ {d2s(s.end_date)}",
-                    "路线": f"{s.travel_from_city} → {s.travel_to_city}",
-                    "km": round(float(s.distance_km or 0), 1),
-                }
-            )
+    task_rows = get_tasks_cached()
+    schedules_recent_rows = get_recent_schedules_cached(120)
+    tasks = [
+        type("TaskLite", (), row)()
+        for row in task_rows
+    ]
 
     if not tasks:
         st.info("请先在【任务管理】中录入任务。")
@@ -1134,36 +1200,24 @@ if page == "智能排班":
             with db_session() as db:
                 task = db.query(Task).filter(Task.id == selected_task_id).first()
                 auditors = db.query(Auditor).all()
-                task_start = task.start_date if task else None
-                task_end = (task.end_date or (task.start_date + timedelta(days=max(1, int(task.required_days or 1)) - 1))) if task else None
-                schedules_all = (
-                    db.query(Schedule)
-                    .filter(Schedule.start_date <= task_end, Schedule.end_date >= task_start)
-                    .all()
-                ) if task else []
-
-                direct_plan, direct_error = build_direct_assignment_plan(task, auditors) if task else (None, None)
-
-                if direct_plan:
-                    st.session_state["recommend_result"] = {
-                        "task_id": selected_task_id,
-                        "candidates": [],
-                        "team": None,
-                        "direct_plan": direct_plan,
-                        "error": None,
-                        "direct_mode": True,
-                    }
+                if task:
+                    task_start = task.start_date
+                    task_end = task.end_date or (task.start_date + timedelta(days=max(1, int(task.required_days or 1)) - 1))
+                    schedules_all = (
+                        db.query(Schedule)
+                        .filter(Schedule.start_date <= task_end, Schedule.end_date >= task_start)
+                        .all()
+                    )
                 else:
-                    candidates = build_candidates(db, task, auditors, schedules_all) if task else []
-                    team = propose_team(task, candidates) if task else None
-                    st.session_state["recommend_result"] = {
-                        "task_id": selected_task_id,
-                        "candidates": candidates[:25],
-                        "team": team,
-                        "direct_plan": None,
-                        "error": direct_error if (direct_error and parse_names(getattr(task, "specified_auditors", None)) and len(parse_names(getattr(task, "specified_auditors", None))) == max(1, int(getattr(task, "required_headcount", 1) or 1))) else (None if team else "无可用团队方案"),
-                        "direct_mode": False,
-                    }
+                    schedules_all = []
+                candidates = build_candidates(db, task, auditors, schedules_all) if task else []
+                team = propose_team(task, candidates) if task else None
+                st.session_state["recommend_result"] = {
+                    "task_id": selected_task_id,
+                    "candidates": candidates[:25],
+                    "team": team,
+                    "error": None if team else "无可用团队方案",
+                }
             st.rerun()
 
         rec = st.session_state.get("recommend_result")
@@ -1176,27 +1230,6 @@ if page == "智能排班":
                 )
             if rec.get("error"):
                 st.error(rec["error"])
-
-            direct_plan = rec.get("direct_plan")
-            if direct_plan:
-                st.subheader("指定人员直录方案")
-                st.write(f"**负责人：** {direct_plan['leader_name']}")
-                st.write("**团队成员：** " + "； ".join(direct_plan["all_names"]))
-                st.caption("当前任务硬指定人数与任务人数一致，已按“指定人员直录”模式处理，不再做系统推荐。")
-                if st.button("按指定人员直接录入", type="primary", key="direct_assign_btn"):
-                    with db_session() as db:
-                        task = db.query(Task).filter(Task.id == selected_task_id).first()
-                        ok, msg = assign_team_to_task(db, task, int(direct_plan["leader_id"]), [int(x) for x in direct_plan["member_ids"]])
-                        if not ok:
-                            db.rollback()
-                            st.error(msg)
-                            st.stop()
-                        if not safe_commit(db, context=f"指定人员直录：task#{selected_task_id}"):
-                            st.stop()
-                    clear_runtime_caches_after_data_change()
-                    st.success("已按指定人员直接录入")
-                    st.rerun()
-
             team = rec.get("team")
             if team:
                 st.subheader("系统推荐团队方案")
@@ -1366,25 +1399,7 @@ elif page == "稽查员管理":
     with db_session() as db:
         auditors = db.query(Auditor).order_by(Auditor.id.desc()).all()
 
-    rows = []
-    for a in auditors:
-        rows.append(
-            {
-                "ID": a.id,
-                "姓名": a.name,
-                "性别": a.gender,
-                "等级": a.group_level,
-                "可带队": "是" if a.can_lead_team else "否",
-                "常驻城市": a.base_city,
-                "周上限": a.max_weekly_tasks,
-                "状态": STATUS_MAP_REV.get(a.status, a.status),
-                "本月院次": a.monthly_cases,
-                "差旅天数": a.travel_days,
-                "连续天数": a.continuous_days,
-                "上次结束城市": a.last_task_end_city or "",
-                "上次结束日期": d2s(a.last_task_end_date),
-            }
-        )
+    rows = get_auditor_rows_cached()
 
     show_table(rows, 320)
 
@@ -1510,24 +1525,7 @@ elif page == "任务管理":
     with db_session() as db:
         tasks = db.query(Task).order_by(Task.id.desc()).all()
 
-    rows = []
-    for t in tasks:
-        rows.append(
-            {
-                "ID": t.id,
-                "项目": t.project_name,
-                "客户": t.customer_name or "",
-                "需要A": "是" if t.need_expert else "否",
-                "人数": t.required_headcount,
-                "天数": t.required_days,
-                "性别": t.required_gender,
-                "硬指定": t.specified_auditors or "",
-                "软指定": t.preferred_experts or "",
-                "城市": t.site_city,
-                "开始": d2s(t.start_date),
-                "结束": d2s(t.end_date),
-            }
-        )
+    rows = get_task_rows_cached()
 
     show_table(rows, 320)
 
@@ -1941,44 +1939,16 @@ elif page == "模板导入":
             st.rerun()
 
 # -------------------- 日历视图 --------------------
+
 elif page == "日历视图":
     st.subheader("日历视图")
     st.caption("按月查看排班、节假日标识，并支持导出 ICS 日历。")
-    with db_session() as db:
-        auditors = db.query(Auditor).order_by(Auditor.name.asc()).all()
-        all_schedules = (
-            db.query(Schedule)
-            .options(joinedload(Schedule.task), joinedload(Schedule.auditor))
-            .order_by(Schedule.start_date.asc())
-            .all()
-        )
-        all_schedules_rows = []
-        seen_day_task = set()
-        for s in all_schedules:
-            uniq = (s.task_id, s.auditor_id, s.start_date, s.end_date)
-            if uniq in seen_day_task:
-                continue
-            seen_day_task.add(uniq)
-            all_schedules_rows.append(
-                {
-                    "id": s.id,
-                    "auditor_id": s.auditor_id,
-                    "auditor_name": (s.auditor.name if s.auditor else ""),
-                    "task_id": s.task_id,
-                    "project_name": (s.task.project_name if s.task else ""),
-                    "site_city": (s.task.site_city if s.task else ""),
-                    "role": s.role,
-                    "start_date": s.start_date,
-                    "end_date": s.end_date,
-                    "travel_from_city": s.travel_from_city,
-                    "travel_to_city": s.travel_to_city,
-                    "distance_km": float(s.distance_km or 0),
-                }
-            )
+
+    auditor_rows = get_auditors_for_calendar_cached()
 
     auditor_options = {"全部稽查员": None}
-    for a in auditors:
-        auditor_options[f"#{a.id} {a.name}"] = a.id
+    for a in auditor_rows:
+        auditor_options[f"#{a['id']} {a['name']}"] = a["id"]
 
     c1, c2, c3 = st.columns(3)
     auditor_label = c1.selectbox("筛选稽查员", list(auditor_options.keys()), key="cal_auditor_filter")
@@ -1990,6 +1960,8 @@ elif page == "日历视图":
     next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
     month_end = next_month - timedelta(days=1)
 
+    all_schedules_rows = get_month_schedules_cached(int(year), int(month))
+
     filtered = []
     for s in all_schedules_rows:
         if auditor_id and s.get("auditor_id") != auditor_id:
@@ -1998,6 +1970,18 @@ elif page == "日历视图":
             filtered.append(s)
 
     day_marks = {it.get("date"): it for it in load_day_marks() if it.get("date", "")[:7] == month_start.strftime("%Y-%m")}
+
+    events_by_day = {}
+    for s in filtered:
+        cur = s.get("start_date")
+        while cur and cur <= s.get("end_date"):
+            events_by_day.setdefault(cur, [])
+            proj = s.get("project_name") or f"任务#{s.get('task_id')}"
+            person = s.get("auditor_name") or f"稽查员#{s.get('auditor_id')}"
+            ev = f"#{s.get('task_id')} {proj}｜{person}"
+            if ev not in events_by_day[cur]:
+                events_by_day[cur].append(ev)
+            cur += timedelta(days=1)
 
     st.subheader(f"{year}年{month}月 日历总览")
     weeks = []
@@ -2021,17 +2005,7 @@ elif page == "日历视图":
             mk = day_marks.get(day.isoformat())
             if mk:
                 marks.append(mk.get("label") or mk.get("type") or "标记")
-            evs = []
-            seen_e = set()
-            for s in filtered:
-                if s.get("start_date") <= day <= s.get("end_date"):
-                    proj = s.get("project_name") or f"任务#{s.get('task_id')}"
-                    person = s.get("auditor_name") or f"稽查员#{s.get('auditor_id')}"
-                    ev = f"{proj}｜{person}"
-                    if ev in seen_e:
-                        continue
-                    seen_e.add(ev)
-                    evs.append(ev)
+            evs = events_by_day.get(day, [])
             color = "#ffffff"
             if day.month != month:
                 color = "#f7f7f7"
