@@ -26,390 +26,7 @@ try:
     ensure_extra_tables
 except NameError:
     def ensure_extra_tables():
-        try:
-            with engine.begin() as conn:
-                conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS direct_assignments (
-                        id INTEGER PRIMARY KEY,
-                        task_id INTEGER NOT NULL,
-                        auditor_id INTEGER,
-                        person_name TEXT,
-                        is_part_time INTEGER NOT NULL DEFAULT 0,
-                        role TEXT,
-                        start_date TEXT NOT NULL,
-                        end_date TEXT NOT NULL,
-                        notes TEXT
-                    )
-                """))
-                conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS monthly_targets (
-                        id INTEGER PRIMARY KEY,
-                        period_type TEXT NOT NULL,
-                        year INTEGER NOT NULL,
-                        period_value INTEGER NOT NULL,
-                        target_projects INTEGER NOT NULL DEFAULT 0,
-                        target_staffing INTEGER NOT NULL DEFAULT 0
-                    )
-                """))
-                conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS part_time_staff (
-                        id INTEGER PRIMARY KEY,
-                        name TEXT NOT NULL,
-                        base_city TEXT,
-                        status TEXT DEFAULT 'active',
-                        note TEXT
-                    )
-                """))
-        except Exception:
-            pass
-
-
-from app.db import Base, SessionLocal, engine, ensure_schema, IS_SQLITE, IS_SQLITE
-from app.models import Auditor, Task, Schedule, CityDistance, City
-from app.scheduler import (
-    build_candidates,
-    propose_team,
-    compute_from_city,
-    get_distance_km,
-    team_objective,
-)
-from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
-
-APP_NAME = "万宁睿和稽查排班"
-PRESET_DISEASE_AREAS = [
-    "内分泌", "核药", "CAR-T", "慢性阻塞性肺疾病", "血管性痴呆", "结肠炎", "哮喘", "乳腺癌", "皮肤病",
-    "乙型肝炎", "实体瘤", "结核", "骨质疏松症", "肺癌", "帕金森", "失眠症", "CIPD", "特应性皮炎", "白血病"
-]
-PRESET_PROJECT_PHASES = ["IIb期", "Ⅲ期", "II期", "I期", "I 期", "II/III期", "I/IIa 期", "II 期"]
-
-st.set_page_config(page_title=APP_NAME, layout="wide")
-
-# -------------------- 上传控件中文化 --------------------
-st.markdown(
-    """
-    <style>
-    [data-testid="stFileUploaderDropzoneInstructions"]{
-        display:none !important;
-    }
-
-    [data-testid="stFileUploaderDropzone"]{
-        position: relative !important;
-    }
-    [data-testid="stFileUploaderDropzone"]::before{
-        content:"将文件拖拽到此处，或点击右侧“浏览文件”上传（支持 .xlsx/.csv，单个文件 ≤200MB）";
-        display:block;
-        color:#333;
-        padding:10px 6px 8px 6px;
-        line-height:1.5;
-        font-size:14px;
-        white-space:normal;
-    }
-
-    [data-testid="stFileUploaderDropzone"] input[type="file"]{
-        width: 100% !important;
-    }
-
-    [data-testid="stFileUploaderDropzone"] input[type="file"]::file-selector-button{
-        min-width: 132px !important;
-        height: 42px !important;
-        padding: 0 18px !important;
-        border-radius: 10px !important;
-        color: transparent !important;
-        -webkit-text-fill-color: transparent !important;
-        text-shadow: none !important;
-    }
-
-    [data-testid="stFileUploaderDropzone"]::after{
-        content:"浏览文件";
-        position:absolute;
-        right: 14px;
-        top: 50%;
-        transform: translateY(-50%);
-        min-width: 132px;
-        height: 42px;
-        padding: 0 18px;
-        border-radius: 10px;
-        border: 1px solid rgba(0,0,0,0.15);
-        background: rgba(255,255,255,0.96);
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        font-size:14px;
-        font-weight:600;
-        color:#111;
-        white-space:nowrap;
-        pointer-events:none;
-        z-index: 9999;
-        box-sizing: border-box;
-    }
-
-    @media (max-width: 520px){
-        [data-testid="stFileUploaderDropzone"] input[type="file"]::file-selector-button{
-            min-width:124px !important;
-            height:40px !important;
-            padding:0 14px !important;
-        }
-        [data-testid="stFileUploaderDropzone"]::after{
-            min-width:124px;
-            height:40px;
-            padding:0 14px;
-            right: 12px;
-            font-size:14px;
-        }
-        [data-testid="stFileUploaderDropzone"]::before{
-            font-size:13px;
-        }
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-# -------------------- 初始化 --------------------
-@contextmanager
-def db_session():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-def safe_parse_date(value) -> Optional[date]:
-    if value is None:
         return None
-
-    try:
-        if pd.isna(value):
-            return None
-    except Exception:
-        pass
-
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-
-    try:
-        if isinstance(value, pd.Timestamp):
-            return value.to_pydatetime().date()
-    except Exception:
-        pass
-
-    try:
-        if isinstance(value, (int, float)) and not (isinstance(value, float) and pd.isna(value)):
-            base = datetime(1899, 12, 30)
-            return (base + timedelta(days=float(value))).date()
-
-        s_num = str(value).strip()
-        if re.fullmatch(r"\d+(\.\d+)?", s_num):
-            base = datetime(1899, 12, 30)
-            return (base + timedelta(days=float(s_num))).date()
-    except Exception:
-        pass
-
-    s = str(value).strip()
-    if not s:
-        return None
-
-    if " " in s:
-        s = s.split(" ")[0].strip()
-    s = s.replace("/", "-").replace(".", "-")
-
-    for fmt in ("%Y-%m-%d", "%Y-%m", "%Y%m%d"):
-        try:
-            d = datetime.strptime(s, fmt).date()
-            if fmt == "%Y-%m":
-                return d.replace(day=1)
-            return d
-        except Exception:
-            pass
-
-    return None
-
-
-def d2s(v: Optional[date]) -> str:
-    return v.strftime("%Y-%m-%d") if v else ""
-
-
-def show_table(rows: list[dict], height: int = 380):
-    if not rows:
-        st.info("暂无数据")
-        return
-    st.dataframe(rows, use_container_width=True, height=height)
-
-
-
-def show_paginated_table(rows: list[dict], key_prefix: str, height: int = 380, default_page_size: int = 20):
-    if not rows:
-        st.info("暂无数据")
-        return []
-    page_size_options = [20, 50, 100, 200]
-    default_index = page_size_options.index(default_page_size) if default_page_size in page_size_options else 0
-    c1, c2 = st.columns([1, 1])
-    page_size = c1.selectbox("每页显示", page_size_options, index=default_index, key=f"{key_prefix}_page_size")
-    total = len(rows)
-    total_pages = max(1, (total + int(page_size) - 1) // int(page_size))
-    page = c2.number_input("页码", min_value=1, max_value=total_pages, value=1, step=1, key=f"{key_prefix}_page")
-    start = (int(page) - 1) * int(page_size)
-    end = min(total, start + int(page_size))
-    st.caption(f"共 {total} 条，当前显示 {start + 1}-{end} 条")
-    page_rows = rows[start:end]
-    st.dataframe(page_rows, use_container_width=True, height=height)
-    return page_rows
-
-def safe_commit(db: Session, context: str = "") -> bool:
-    try:
-        db.commit()
-        return True
-    except IntegrityError as e:
-        db.rollback()
-        st.error(f"数据库写入失败：{context}。常见原因：重复数据 / 唯一约束冲突。")
-        st.exception(e)
-        return False
-    except Exception as e:
-        db.rollback()
-        st.error(f"数据库写入失败：{context}")
-        st.exception(e)
-        return False
-
-
-def clear_runtime_caches_after_data_change():
-    for k in [
-        "recommend_result",
-        "batch_report",
-        "smart_task_select",
-        "member_ids_text",
-        "edit_auditor_select",
-        "edit_task_select",
-    ]:
-        if k in st.session_state:
-            st.session_state.pop(k, None)
-
-    st.session_state["data_version"] = int(st.session_state.get("data_version", 0)) + 1
-
-    try:
-        get_tasks_for_ui.clear()
-        get_recent_schedule_rows.clear()
-        get_recommendation_payload.clear()
-        get_auditors_for_ui.clear()
-        get_calendar_payload.clear()
-        build_ics_events_cached.clear()
-    except Exception:
-        pass
-
-
-def _safe_int(x, default=None):
-    try:
-        if x is None:
-            return default
-        if isinstance(x, float) and pd.isna(x):
-            return default
-        s = str(x).strip()
-        if s == "":
-            return default
-        return int(float(s))
-    except Exception:
-        return default
-
-
-def normalize_text(v) -> str:
-    if v is None:
-        return ""
-    try:
-        if pd.isna(v):
-            return ""
-    except Exception:
-        pass
-    return str(v).strip()
-
-
-def ensure_extra_tables():
-    with engine.begin() as conn:
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS direct_assignments (
-                id INTEGER PRIMARY KEY,
-                task_id INTEGER NOT NULL,
-                auditor_id INTEGER,
-                person_name TEXT NOT NULL,
-                is_part_time INTEGER NOT NULL DEFAULT 0,
-                role TEXT NOT NULL DEFAULT 'member',
-                start_date TEXT NOT NULL,
-                end_date TEXT NOT NULL,
-                project_name TEXT,
-                notes TEXT,
-                created_at TEXT
-            )
-        """))
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS part_time_staff (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL UNIQUE,
-                base_city TEXT,
-                note TEXT,
-                is_active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT
-            )
-        """))
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS day_marks (
-                id INTEGER PRIMARY KEY,
-                date TEXT NOT NULL UNIQUE,
-                mark_type TEXT,
-                label TEXT
-            )
-        """))
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS progress_targets (
-                id INTEGER PRIMARY KEY,
-                period_type TEXT NOT NULL,
-                year INTEGER NOT NULL,
-                period_value INTEGER NOT NULL DEFAULT 0,
-                target_projects INTEGER NOT NULL DEFAULT 0,
-                target_staffing INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT
-            )
-        """))
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS task_attributes (
-                task_id INTEGER PRIMARY KEY,
-                capital_type TEXT,
-                project_phase TEXT,
-                disease_area TEXT,
-                updated_at TEXT
-            )
-        """))
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS auditor_capacity_targets (
-                auditor_id INTEGER PRIMARY KEY,
-                min_monthly_cases INTEGER NOT NULL DEFAULT 4,
-                max_monthly_cases INTEGER NOT NULL DEFAULT 6,
-                updated_at TEXT
-            )
-        """))
-        for ddl in [
-            "ALTER TABLE direct_assignments ADD COLUMN project_name TEXT",
-            "ALTER TABLE direct_assignments ADD COLUMN created_at TEXT",
-            "ALTER TABLE progress_targets ADD COLUMN period_value INTEGER DEFAULT 0",
-            "ALTER TABLE progress_targets ADD COLUMN target_projects INTEGER DEFAULT 0",
-            "ALTER TABLE progress_targets ADD COLUMN target_staffing INTEGER DEFAULT 0",
-            "ALTER TABLE progress_targets ADD COLUMN updated_at TEXT",
-            "ALTER TABLE task_attributes ADD COLUMN capital_type TEXT",
-            "ALTER TABLE task_attributes ADD COLUMN project_phase TEXT",
-            "ALTER TABLE task_attributes ADD COLUMN disease_area TEXT",
-            "ALTER TABLE task_attributes ADD COLUMN updated_at TEXT",
-            "ALTER TABLE auditor_capacity_targets ADD COLUMN min_monthly_cases INTEGER DEFAULT 4",
-            "ALTER TABLE auditor_capacity_targets ADD COLUMN max_monthly_cases INTEGER DEFAULT 6",
-            "ALTER TABLE auditor_capacity_targets ADD COLUMN updated_at TEXT",
-        ]:
-            try:
-                conn.execute(text(ddl))
-            except Exception:
-                pass
-        try:
-            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_progress_targets_period ON progress_targets(period_type, year, period_value)"))
-        except Exception:
-            pass
 
 
 def parse_name_list(raw) -> list[str]:
@@ -429,38 +46,34 @@ def parse_name_list(raw) -> list[str]:
 
 
 def get_task_attribute_map(task_ids: list[int] | None = None) -> dict[int, dict]:
-    globals().get("ensure_extra_tables", lambda: None)()
-    sql = "SELECT task_id, capital_type, project_phase, disease_area FROM task_attributes"
-    params = {}
-    if task_ids:
-        sql += " WHERE task_id IN ({})".format(",".join([f":id{i}" for i, _ in enumerate(task_ids)]))
-        params = {f"id{i}": int(v) for i, v in enumerate(task_ids)}
-    with engine.begin() as conn:
-        rows = conn.execute(text(sql), params).mappings().all()
-    return {int(r["task_id"]): dict(r) for r in rows}
+    store = st.session_state.get("_task_attr_store", {}) or {}
+    if not task_ids:
+        return {int(k): dict(v) for k, v in store.items()}
+    out = {}
+    for task_id in task_ids:
+        task_id = int(task_id)
+        if task_id in store:
+            out[task_id] = dict(store[task_id])
+    return out
 
 
 def get_task_attributes(task_id: int) -> dict:
-    mp = get_task_attribute_map([int(task_id)])
-    return mp.get(int(task_id), {"task_id": int(task_id), "capital_type": "", "project_phase": "", "disease_area": ""})
+    task_id = int(task_id)
+    mp = get_task_attribute_map([task_id])
+    return mp.get(task_id, {"task_id": task_id, "capital_type": "", "project_phase": "", "disease_area": ""})
 
 
 def save_task_attributes(task_id: int, capital_type: str = "", project_phase: str = "", disease_area: str = ""):
-    globals().get("ensure_extra_tables", lambda: None)()
-    params = {
-        "task_id": int(task_id),
-        "capital_type": normalize_text(capital_type) or None,
-        "project_phase": normalize_text(project_phase) or None,
-        "disease_area": normalize_text(disease_area) or None,
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    task_id = int(task_id)
+    store = dict(st.session_state.get("_task_attr_store", {}) or {})
+    store[task_id] = {
+        "task_id": task_id,
+        "capital_type": normalize_text(capital_type),
+        "project_phase": normalize_text(project_phase),
+        "disease_area": normalize_text(disease_area),
     }
-    with engine.begin() as conn:
-        updated = conn.execute(text("UPDATE task_attributes SET capital_type=:capital_type, project_phase=:project_phase, disease_area=:disease_area, updated_at=:updated_at WHERE task_id=:task_id"), params)
-        if getattr(updated, "rowcount", 0) == 0:
-            conn.execute(text("INSERT INTO task_attributes (task_id, capital_type, project_phase, disease_area, updated_at) VALUES (:task_id, :capital_type, :project_phase, :disease_area, :updated_at)"), params)
-
-
-
+    st.session_state["_task_attr_store"] = store
+    return True
 
 def _preset_or_other(value: str, options: list[str]):
     v = normalize_text(value)
@@ -480,35 +93,35 @@ def _merge_preset_and_other(selected: str, other_text: str) -> str:
 
 
 def get_auditor_capacity_map(auditor_ids: list[int] | None = None) -> dict[int, dict]:
-    globals().get("ensure_extra_tables", lambda: None)()
-    sql = "SELECT auditor_id, min_monthly_cases, max_monthly_cases FROM auditor_capacity_targets"
-    params = {}
-    if auditor_ids:
-        sql += " WHERE auditor_id IN ({})".format(",".join([f":id{i}" for i, _ in enumerate(auditor_ids)]))
-        params = {f"id{i}": int(v) for i, v in enumerate(auditor_ids)}
-    with engine.begin() as conn:
-        rows = conn.execute(text(sql), params).mappings().all()
-    out = {int(r["auditor_id"]): dict(r) for r in rows}
-    for aid in auditor_ids or []:
+    ids = {int(v) for v in (auditor_ids or [])}
+    out = {}
+    with db_session() as db:
+        q = db.query(Auditor)
+        if ids:
+            q = q.filter(Auditor.id.in_(list(ids)))
+        auditors = q.all()
+        for a in auditors:
+            base = int(getattr(a, "monthly_cases", 0) or 0)
+            max_m = base if base > 0 else 6
+            min_m = max(0, min(4, max_m)) if base > 0 else 4
+            if max_m < min_m:
+                max_m = min_m
+            out[int(a.id)] = {"auditor_id": int(a.id), "min_monthly_cases": int(min_m), "max_monthly_cases": int(max_m)}
+    for aid in ids:
         out.setdefault(int(aid), {"auditor_id": int(aid), "min_monthly_cases": 4, "max_monthly_cases": 6})
     return out
 
 
 def save_auditor_capacity_target(auditor_id: int, min_monthly_cases: int = 4, max_monthly_cases: int = 6):
-    globals().get("ensure_extra_tables", lambda: None)()
     min_cases = max(0, int(min_monthly_cases or 0))
     max_cases = max(min_cases, int(max_monthly_cases or 0))
-    params = {
-        "auditor_id": int(auditor_id),
-        "min_monthly_cases": min_cases,
-        "max_monthly_cases": max_cases,
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    with engine.begin() as conn:
-        updated = conn.execute(text("UPDATE auditor_capacity_targets SET min_monthly_cases=:min_monthly_cases, max_monthly_cases=:max_monthly_cases, updated_at=:updated_at WHERE auditor_id=:auditor_id"), params)
-        if getattr(updated, "rowcount", 0) == 0:
-            conn.execute(text("INSERT INTO auditor_capacity_targets (auditor_id, min_monthly_cases, max_monthly_cases, updated_at) VALUES (:auditor_id, :min_monthly_cases, :max_monthly_cases, :updated_at)"), params)
-
+    with db_session() as db:
+        obj = db.query(Auditor).filter(Auditor.id == int(auditor_id)).first()
+        if not obj:
+            return False, "未找到稽查员"
+        obj.monthly_cases = int(max_cases)
+        ok = safe_commit(db, f"更新稽查员标准院次#{auditor_id}")
+        return (True, "已保存") if ok else (False, "保存失败")
 
 def get_subperiod_progress_rows(period_type: str, year: int, period_value: int):
     rows = []
@@ -608,144 +221,62 @@ def build_calendar_png_bytes(year: int, month: int, events_by_day: dict, day_mar
 
 
 def load_day_marks() -> list[dict]:
-    globals().get("ensure_extra_tables", lambda: None)()
-    with engine.begin() as conn:
-        rows = conn.execute(text("SELECT date, mark_type, label FROM day_marks ORDER BY date ASC")).mappings().all()
-    return [dict(r) for r in rows]
+    return []
 
 
 def get_part_time_staff_rows(active_only: bool = False) -> list[dict]:
-    globals().get("ensure_extra_tables", lambda: None)()
-    sql = "SELECT id, name, base_city, note, is_active, created_at FROM part_time_staff"
-    params = {}
-    if active_only:
-        sql += " WHERE is_active = 1"
-    sql += " ORDER BY is_active DESC, name ASC"
-    with engine.begin() as conn:
-        rows = conn.execute(text(sql), params).mappings().all()
-    return [dict(r) for r in rows]
+    return []
 
 
 def save_part_time_staff(name: str, base_city: str = '', note: str = '', is_active: bool = True):
-    globals().get("ensure_extra_tables", lambda: None)()
-    nm = normalize_text(name)
-    if not nm:
-        return False, '兼职姓名不能为空'
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    with engine.begin() as conn:
-        exists = conn.execute(text("SELECT id FROM part_time_staff WHERE name=:name"), {'name': nm}).mappings().first()
-        if exists:
-            conn.execute(text("UPDATE part_time_staff SET base_city=:base_city, note=:note, is_active=:is_active WHERE name=:name"), {
-                'name': nm, 'base_city': normalize_text(base_city) or None, 'note': normalize_text(note) or None, 'is_active': 1 if is_active else 0
-            })
-            return True, '兼职人员已更新'
-        conn.execute(text("INSERT INTO part_time_staff (name, base_city, note, is_active, created_at) VALUES (:name, :base_city, :note, :is_active, :created_at)"), {
-            'name': nm, 'base_city': normalize_text(base_city) or None, 'note': normalize_text(note) or None, 'is_active': 1 if is_active else 0, 'created_at': now
-        })
-    return True, '兼职人员已保存'
+    return False, '纯稳定生产版已关闭兼职库持久化，请使用内部稽查员排班'
 
 
 def delete_part_time_staff(row_id: int):
-    globals().get("ensure_extra_tables", lambda: None)()
-    with engine.begin() as conn:
-        exists = conn.execute(text('SELECT id FROM part_time_staff WHERE id=:id'), {'id': int(row_id)}).mappings().first()
-        if not exists:
-            return False, '兼职人员不存在'
-        conn.execute(text('DELETE FROM part_time_staff WHERE id=:id'), {'id': int(row_id)})
-    return True, '兼职人员已删除'
-
+    return False, '纯稳定生产版已关闭兼职库持久化' 
 
 def get_direct_assignments(task_id: int) -> list[dict]:
-    globals().get("ensure_extra_tables", lambda: None)()
-    with engine.begin() as conn:
-        rows = conn.execute(text("""
-            SELECT id, task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, project_name, notes, created_at
-            FROM direct_assignments
-            WHERE task_id = :task_id
-            ORDER BY CASE WHEN role='leader' THEN 0 ELSE 1 END, start_date ASC, person_name ASC
-        """), {'task_id': int(task_id)}).mappings().all()
+    with db_session() as db:
+        rows = (
+            db.query(Schedule, Auditor)
+            .join(Auditor, Auditor.id == Schedule.auditor_id)
+            .filter(Schedule.task_id == int(task_id))
+            .order_by(Schedule.start_date.asc(), Schedule.id.asc())
+            .all()
+        )
     out = []
-    for r in rows:
-        d = dict(r)
-        d['start_date'] = d.get('start_date') or ''
-        d['end_date'] = d.get('end_date') or ''
-        out.append(d)
+    for s, a in rows:
+        out.append({
+            "id": int(getattr(s, "id")),
+            "task_id": int(task_id),
+            "auditor_id": int(getattr(a, "id")),
+            "person_name": getattr(a, "name", ""),
+            "is_part_time": False,
+            "role": getattr(s, "role", "member"),
+            "start_date": d2s(getattr(s, "start_date", None)),
+            "end_date": d2s(getattr(s, "end_date", None)),
+            "project_name": "",
+            "notes": "",
+            "created_at": "",
+        })
     return out
 
 
 def replace_direct_assignments(task_id: int, rows: list[dict]):
-    globals().get("ensure_extra_tables", lambda: None)()
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    with engine.begin() as conn:
-        conn.execute(text('DELETE FROM direct_assignments WHERE task_id=:task_id'), {'task_id': int(task_id)})
-        for r in rows or []:
-            sd = safe_parse_date(r.get('start_date'))
-            ed = safe_parse_date(r.get('end_date'))
-            person_name = normalize_text(r.get('person_name'))
-            if not person_name or not sd or not ed:
-                continue
-            if ed < sd:
-                ed = sd
-            conn.execute(text("""
-                INSERT INTO direct_assignments (task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, project_name, notes, created_at)
-                VALUES (:task_id, :auditor_id, :person_name, :is_part_time, :role, :start_date, :end_date, :project_name, :notes, :created_at)
-            """), {
-                'task_id': int(task_id),
-                'auditor_id': int(r['auditor_id']) if r.get('auditor_id') else None,
-                'person_name': person_name,
-                'is_part_time': 1 if bool(r.get('is_part_time')) else 0,
-                'role': 'leader' if str(r.get('role')) == 'leader' else 'member',
-                'start_date': d2s(sd),
-                'end_date': d2s(ed),
-                'project_name': normalize_text(r.get('project_name')) or None,
-                'notes': normalize_text(r.get('notes')) or None,
-                'created_at': now,
-            })
-
-
-def save_direct_assignments_from_df(task_id: int, df_in):
     with db_session() as db:
-        auditors = db.query(Auditor).all()
         task = db.query(Task).filter(Task.id == int(task_id)).first()
-    if not task:
-        return False, '任务不存在'
-    auditor_name_to_id = {a.name: a.id for a in auditors}
-    rows_out = []
-    for _, r in pd.DataFrame(df_in).iterrows():
-        person_name = normalize_text(r.get('人员姓名'))
-        if not person_name:
-            continue
-        is_part_time = normalize_text(r.get('类型')) == '兼职'
-        sd = safe_parse_date(r.get('开始日期')) or task.start_date
-        ed = safe_parse_date(r.get('结束日期')) or task.end_date or task.start_date
-        rows_out.append({
-            'auditor_id': None if is_part_time else auditor_name_to_id.get(person_name),
-            'person_name': person_name,
-            'is_part_time': is_part_time,
-            'role': 'leader' if normalize_text(r.get('角色')) == '组长' else 'member',
-            'start_date': sd,
-            'end_date': ed,
-            'project_name': normalize_text(r.get('项目名称')) or normalize_text(task.project_name),
-            'notes': normalize_text(r.get('备注')),
-        })
-    replace_direct_assignments(int(task_id), rows_out)
-    return True, '已定项目人员已保存'
-
-
-def sync_task_schedules_from_direct_assignments(task: Task):
-    direct_rows = get_direct_assignments(int(task.id))
-    internal_rows = [r for r in direct_rows if not bool(r.get('is_part_time')) and r.get('auditor_id')]
-    if not internal_rows:
-        return False, '当前仅有兼职人员，已保存直录信息，但没有可同步到系统排班表的内部稽查员'
-
-    with db_session() as db:
-        db.query(Schedule).filter(Schedule.task_id == int(task.id)).delete()
-        for r in internal_rows:
-            auditor = db.query(Auditor).filter(Auditor.id == int(r.get('auditor_id'))).first()
+        if not task:
+            return False, "任务不存在"
+        db.query(Schedule).filter(Schedule.task_id == int(task_id)).delete()
+        for r in rows or []:
+            auditor_id = r.get("auditor_id")
+            if not auditor_id:
+                continue
+            auditor = db.query(Auditor).filter(Auditor.id == int(auditor_id)).first()
             if not auditor:
                 continue
-            sd = safe_parse_date(r.get('start_date')) or task.start_date
-            ed = safe_parse_date(r.get('end_date')) or task.end_date or task.start_date
+            sd = safe_parse_date(r.get("start_date")) or task.start_date
+            ed = safe_parse_date(r.get("end_date")) or task.end_date or task.start_date
             if ed < sd:
                 ed = sd
             from_city = compute_from_city(auditor, task)
@@ -762,10 +293,50 @@ def sync_task_schedules_from_direct_assignments(task: Task):
                 score=0.0,
                 status='confirmed',
             ))
-        if not safe_commit(db, f'同步已定项目人员到排班 task#{task.id}'):
-            return False, '同步失败'
-    return True, '已按已定项目人员同步到排班表'
+        ok = safe_commit(db, f'直录排班 task#{task_id}')
+        return (True, '已直录到排班表') if ok else (False, '直录失败')
 
+
+def save_direct_assignments_from_df(task_id: int, df_in):
+    with db_session() as db:
+        auditors = db.query(Auditor).all()
+        task = db.query(Task).filter(Task.id == int(task_id)).first()
+    if not task:
+        return False, '任务不存在'
+    auditor_name_to_id = {a.name: a.id for a in auditors}
+    rows_out = []
+    skipped_part_time = 0
+    for _, r in pd.DataFrame(df_in).iterrows():
+        person_name = normalize_text(r.get('人员姓名'))
+        if not person_name:
+            continue
+        is_part_time = '兼职' in normalize_text(r.get('类型'))
+        if is_part_time:
+            skipped_part_time += 1
+            continue
+        auditor_id = auditor_name_to_id.get(person_name)
+        if not auditor_id:
+            continue
+        sd = safe_parse_date(r.get('开始日期')) or task.start_date
+        ed = safe_parse_date(r.get('结束日期')) or task.end_date or task.start_date
+        rows_out.append({
+            'auditor_id': auditor_id,
+            'person_name': person_name,
+            'is_part_time': False,
+            'role': 'leader' if normalize_text(r.get('角色')) == '组长' else 'member',
+            'start_date': sd,
+            'end_date': ed,
+            'project_name': normalize_text(r.get('项目名称')) or normalize_text(task.project_name),
+            'notes': normalize_text(r.get('备注')),
+        })
+    ok, msg = replace_direct_assignments(int(task_id), rows_out)
+    if skipped_part_time:
+        msg += f'；已忽略{skipped_part_time}条兼职记录（纯稳定生产版不写兼职库）'
+    return ok, msg
+
+
+def sync_task_schedules_from_direct_assignments(task: Task):
+    return True, '已定项目人员已直接写入排班表，无需再次同步' 
 
 def _get_period_range(period_type: str, year: int, period_value: int):
     year = int(year)
@@ -791,59 +362,42 @@ def _get_period_range(period_type: str, year: int, period_value: int):
 
 
 def get_target_row(period_type: str, year: int, period_value: int) -> dict:
-    globals().get("ensure_extra_tables", lambda: None)()
-    with engine.begin() as conn:
-        row = conn.execute(text("SELECT period_type, year, period_value, target_projects, target_staffing FROM progress_targets WHERE period_type=:period_type AND year=:year AND period_value=:period_value"), {
-            'period_type': str(period_type), 'year': int(year), 'period_value': int(period_value or 0)
-        }).mappings().first()
-    return dict(row) if row else {'period_type': period_type, 'year': int(year), 'period_value': int(period_value or 0), 'target_projects': 0, 'target_staffing': 0}
+    key = f"{period_type}:{int(year)}:{int(period_value or 0)}"
+    store = dict(st.session_state.get("_progress_targets_store", {}) or {})
+    if key in store:
+        row = dict(store[key])
+        row.setdefault("period_type", period_type)
+        row.setdefault("year", int(year))
+        row.setdefault("period_value", int(period_value or 0))
+        row.setdefault("target_projects", 0)
+        row.setdefault("target_staffing", 0)
+        return row
+
+    start_d, end_d = _get_period_range(period_type, int(year), int(period_value or 0))
+    with db_session() as db:
+        tasks = db.query(Task).filter(Task.start_date >= start_d, Task.start_date <= end_d).all()
+    auto_target = len({int(t.id) for t in tasks})
+    return {
+        'period_type': period_type,
+        'year': int(year),
+        'period_value': int(period_value or 0),
+        'target_projects': int(auto_target),
+        'target_staffing': 0
+    }
 
 
 def save_target_row(period_type: str, year: int, period_value: int, target_projects: int, target_staffing: int):
-    globals().get("ensure_extra_tables", lambda: None)()
-    params = {
-        'period_type': str(period_type), 'year': int(year), 'period_value': int(period_value or 0),
-        'target_projects': int(target_projects or 0), 'target_staffing': int(target_staffing or 0),
-        'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    key = f"{period_type}:{int(year)}:{int(period_value or 0)}"
+    store = dict(st.session_state.get("_progress_targets_store", {}) or {})
+    store[key] = {
+        'period_type': period_type,
+        'year': int(year),
+        'period_value': int(period_value or 0),
+        'target_projects': int(target_projects or 0),
+        'target_staffing': int(target_staffing or 0),
     }
-    from sqlalchemy.exc import SQLAlchemyError
-    try:
-        with engine.begin() as conn:
-            existing = conn.execute(
-                text("SELECT id FROM progress_targets WHERE period_type=:period_type AND year=:year AND period_value=:period_value"),
-                {
-                    'period_type': params['period_type'],
-                    'year': params['year'],
-                    'period_value': params['period_value'],
-                },
-            ).mappings().first()
-
-            if existing and existing.get('id') is not None:
-                conn.execute(
-                    text("UPDATE progress_targets SET target_projects=:target_projects, target_staffing=:target_staffing, updated_at=:updated_at WHERE id=:id"),
-                    {
-                        'id': int(existing['id']),
-                        'target_projects': params['target_projects'],
-                        'target_staffing': params['target_staffing'],
-                        'updated_at': params['updated_at'],
-                    },
-                )
-            else:
-                next_id = conn.execute(text("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM progress_targets")).scalar() or 1
-                conn.execute(
-                    text("INSERT INTO progress_targets (id, period_type, year, period_value, target_projects, target_staffing, updated_at) VALUES (:id, :period_type, :year, :period_value, :target_projects, :target_staffing, :updated_at)"),
-                    {
-                        'id': int(next_id),
-                        **params,
-                    },
-                )
-
-        saved = get_target_row(params['period_type'], params['year'], params['period_value'])
-        return int(saved.get('target_projects', 0) or 0) == int(params['target_projects'])
-    except SQLAlchemyError as e:
-        st.error(f"保存指标失败：{e}")
-        return False
-
+    st.session_state["_progress_targets_store"] = store
+    return True
 
 def get_progress_stats(period_type: str, year: int, period_value: int):
     start_d, end_d = _get_period_range(period_type, year, period_value)
