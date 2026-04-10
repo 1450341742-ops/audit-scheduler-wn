@@ -1,3 +1,22 @@
+
+try:
+    CITY_COORDS
+except NameError:
+    try:
+        from app.seed_distances import CITY_COORDS as _CITY_COORDS_FALLBACK
+        CITY_COORDS = _CITY_COORDS_FALLBACK
+    except Exception:
+        CITY_COORDS = {}
+
+try:
+    SEED_CITY_DISTANCES
+except NameError:
+    try:
+        from app.seed_distances import SEED_CITY_DISTANCES as _SEED_CITY_DISTANCES_FALLBACK
+        SEED_CITY_DISTANCES = _SEED_CITY_DISTANCES_FALLBACK
+    except Exception:
+        SEED_CITY_DISTANCES = []
+
 from __future__ import annotations
 import csv
 import io
