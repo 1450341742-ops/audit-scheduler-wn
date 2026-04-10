@@ -510,7 +510,16 @@ def seed_cities_if_needed(db: Session):
 
 @st.cache_resource(show_spinner=False)
 def initialize_app_once():
-    Base.metadata.create_all(bind=engine)
+    
+@contextmanager
+def db_session():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+Base.metadata.create_all(bind=engine)
     ensure_schema()
     with db_session() as db:
         seed_city_distances_if_needed(db)
