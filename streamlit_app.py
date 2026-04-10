@@ -1,3 +1,4 @@
+from __future__ import annotations
 
 try:
     CITY_COORDS
@@ -17,7 +18,6 @@ except NameError:
     except Exception:
         SEED_CITY_DISTANCES = []
 
-from __future__ import annotations
 import csv
 import io
 import json
