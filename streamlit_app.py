@@ -357,8 +357,7 @@ def ensure_extra_tables():
                 period_value INTEGER NOT NULL DEFAULT 0,
                 target_projects INTEGER NOT NULL DEFAULT 0,
                 target_staffing INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT,
-                UNIQUE(period_type, year, period_value)
+                updated_at TEXT
             )
         """))
         conn.execute(text("""
@@ -370,8 +369,24 @@ def ensure_extra_tables():
                 updated_at TEXT
             )
         """))
+        for ddl in [
+            "ALTER TABLE direct_assignments ADD COLUMN project_name TEXT",
+            "ALTER TABLE direct_assignments ADD COLUMN created_at TEXT",
+            "ALTER TABLE progress_targets ADD COLUMN period_value INTEGER DEFAULT 0",
+            "ALTER TABLE progress_targets ADD COLUMN target_projects INTEGER DEFAULT 0",
+            "ALTER TABLE progress_targets ADD COLUMN target_staffing INTEGER DEFAULT 0",
+            "ALTER TABLE progress_targets ADD COLUMN updated_at TEXT",
+            "ALTER TABLE task_attributes ADD COLUMN capital_type TEXT",
+            "ALTER TABLE task_attributes ADD COLUMN project_phase TEXT",
+            "ALTER TABLE task_attributes ADD COLUMN disease_area TEXT",
+            "ALTER TABLE task_attributes ADD COLUMN updated_at TEXT",
+        ]:
+            try:
+                conn.execute(text(ddl))
+            except Exception:
+                pass
         try:
-            conn.execute(text("ALTER TABLE direct_assignments ADD COLUMN project_name TEXT"))
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_progress_targets_period ON progress_targets(period_type, year, period_value)"))
         except Exception:
             pass
 
@@ -625,16 +640,21 @@ def save_target_row(period_type: str, year: int, period_value: int, target_proje
     }
     update_sql = text("UPDATE progress_targets SET target_projects=:target_projects, target_staffing=:target_staffing, updated_at=:updated_at WHERE period_type=:period_type AND year=:year AND period_value=:period_value")
     insert_sql = text("INSERT INTO progress_targets (period_type, year, period_value, target_projects, target_staffing, updated_at) VALUES (:period_type, :year, :period_value, :target_projects, :target_staffing, :updated_at)")
-    from sqlalchemy.exc import IntegrityError
-    with engine.begin() as conn:
-        try:
-            existing = conn.execute(text("SELECT id FROM progress_targets WHERE period_type=:period_type AND year=:year AND period_value=:period_value"), params).mappings().first()
-            if existing:
-                conn.execute(update_sql, params)
-            else:
+    from sqlalchemy.exc import SQLAlchemyError
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(update_sql, params)
+            if int(getattr(result, 'rowcount', 0) or 0) == 0:
                 conn.execute(insert_sql, params)
-        except IntegrityError:
-            conn.execute(update_sql, params)
+        return True
+    except SQLAlchemyError:
+        try:
+            with engine.begin() as conn:
+                conn.execute(update_sql, params)
+            return True
+        except SQLAlchemyError as e:
+            st.error(f"保存指标失败：{e}")
+            return False
 
 
 def get_progress_stats(period_type: str, year: int, period_value: int):
