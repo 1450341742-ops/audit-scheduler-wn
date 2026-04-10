@@ -112,11 +112,9 @@ def get_distance_km(db: Session, from_city: str, to_city: str) -> float:
 
 def build_candidates(db: Session, task: Task, auditors, schedules_all):
     """
-    稳定版候选池逻辑：
-    - 这里只做基础条件筛选
-    - 不因为 need_expert=True 就把所有候选人限制为 A
-    - “A带队”只在 propose_team 阶段限制 leader
-    - 硬指定人员：改为“必须包含”，不再是“只允许这些人”
+    性能优化版候选池逻辑：
+    - 预先按 auditor_id 分组排班，避免每个候选人都全表扫描 schedules_all
+    - 其余业务规则保持不变
     """
     task_start = _task_start(task)
     task_end = _task_end(task)
@@ -124,6 +122,11 @@ def build_candidates(db: Session, task: Task, auditors, schedules_all):
     required_gender = _norm(getattr(task, "required_gender", "不限"))
     site_city = _norm(getattr(task, "site_city", ""))
     preferred_names = set(_parse_names(getattr(task, "preferred_experts", None)))
+
+    schedules_by_auditor = {}
+    for s in schedules_all:
+        aid = int(getattr(s, "auditor_id"))
+        schedules_by_auditor.setdefault(aid, []).append(s)
 
     candidates = []
 
@@ -142,10 +145,10 @@ def build_candidates(db: Session, task: Task, auditors, schedules_all):
         if required_gender in ("男", "女") and gender and gender != required_gender:
             continue
 
+        own_schedules = schedules_by_auditor.get(auditor_id, [])
+
         conflict = False
-        for s in schedules_all:
-            if int(getattr(s, "auditor_id")) != auditor_id:
-                continue
+        for s in own_schedules:
             s_start = getattr(s, "start_date", None)
             s_end = getattr(s, "end_date", None) or s_start
             if s_start and s_end and _overlap(task_start, task_end, s_start, s_end):
@@ -158,7 +161,7 @@ def build_candidates(db: Session, task: Task, auditors, schedules_all):
         if last_date and last_date >= task_start:
             continue
 
-        week_count = _count_week_tasks(auditor_id, task, schedules_all)
+        week_count = _count_week_tasks(auditor_id, task, own_schedules)
         if week_count >= max_weekly_tasks:
             continue
 
