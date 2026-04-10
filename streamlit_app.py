@@ -110,6 +110,17 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
+try:
+    ensure_extra_tables
+except NameError:
+    def ensure_extra_tables():
+        try:
+            ensure_support_tables()
+        except Exception:
+            return None
+
+
 # -------------------- 初始化 --------------------
 
 
@@ -203,6 +214,11 @@ def safe_commit(db: Session, context: str = "") -> bool:
 
 
 def clear_runtime_caches_after_data_change():
+    st.session_state["_data_version"] = int(st.session_state.get("_data_version", 0) or 0) + 1
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
     for k in [
         "recommend_result",
         "batch_report",
@@ -213,6 +229,10 @@ def clear_runtime_caches_after_data_change():
     ]:
         if k in st.session_state:
             st.session_state.pop(k, None)
+
+
+def get_data_version() -> int:
+    return int(st.session_state.get("_data_version", 0) or 0)
 
 
 def _safe_int(x, default=None):
@@ -549,6 +569,7 @@ def initialize_app_once():
     with db_session() as db:
         seed_city_distances_if_needed(db)
         seed_cities_if_needed(db)
+    bootstrap_auth_users_if_needed()
     return True
 
 initialize_app_once()
@@ -838,8 +859,6 @@ def check_login(username: str, password: str) -> bool:
     return str(user.get("password_hash")) == hash_password(str(password))
 
 
-bootstrap_auth_users_if_needed()
-
 
 def render_login():
     st.title(APP_NAME)
@@ -885,15 +904,15 @@ def ics_escape(s: str) -> str:
 
 
 def build_ics_events(db: Session, auditor_id: int | None = None):
-    q = db.query(Schedule).order_by(Schedule.id.desc())
+    q = db.query(Schedule).options(joinedload(Schedule.task), joinedload(Schedule.auditor)).order_by(Schedule.id.desc())
     if auditor_id:
         q = q.filter(Schedule.auditor_id == auditor_id)
     sch = q.all()
     events = []
     now = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     for s in sch:
-        a = db.query(Auditor).filter(Auditor.id == s.auditor_id).first()
-        t = db.query(Task).filter(Task.id == s.task_id).first()
+        a = s.auditor
+        t = s.task
         if not a or not t:
             continue
         start = datetime.combine(t.start_date, datetime.min.time()).replace(hour=9)
@@ -903,7 +922,9 @@ def build_ics_events(db: Session, auditor_id: int | None = None):
         end_exclusive = datetime.combine(actual_end + timedelta(days=1), datetime.min.time()).replace(hour=18)
         uid = f"wnrh-{s.id}@scheduler"
         summary = f"{t.project_name}｜{t.site_city}｜{s.role}"
-        desc = f"客户:{t.customer_name or ''}\n人数:{t.required_headcount} 天数:{t.required_days}\n负责人/成员:{a.name}"
+        desc = f"客户:{t.customer_name or ''}
+人数:{t.required_headcount} 天数:{t.required_days}
+负责人/成员:{a.name}"
         events.extend(
             [
                 "BEGIN:VEVENT",
@@ -925,7 +946,8 @@ def build_ics_events(db: Session, auditor_id: int | None = None):
         *events,
         "END:VCALENDAR",
     ]
-    return "\r\n".join(lines).encode("utf-8")
+    return "
+".join(lines).encode("utf-8")
 
 
 def update_auditor_record(
@@ -1264,11 +1286,9 @@ if (not is_admin) and (page not in allowed_pages):
     st.error("当前账号无权限访问该板块，请联系主管理员开通。")
     st.stop()
 
-# -------------------- 智能排班 --------------------
-if page == "智能排班":
-    st.subheader("智能排班")
-    st.caption("先按硬约束筛选，再按距离优先 + 适度负荷均衡评分推荐。")
 
+@st.cache_data(show_spinner=False, ttl=30)
+def load_smart_page_payload(_data_version: int):
     with db_session() as db:
         tasks = db.query(Task).order_by(Task.id.desc()).all()
         schedules_recent = (
@@ -1278,25 +1298,108 @@ if page == "智能排班":
             .limit(120)
             .all()
         )
-        schedules_recent_rows = []
-        for s in schedules_recent:
-            schedules_recent_rows.append(
-                {
-                    "ID": s.id,
-                    "任务": f"#{s.task_id} {(s.task.project_name if s.task else '')}",
-                    "人员": f"#{s.auditor_id} {(s.auditor.name if s.auditor else '')} ({(s.auditor.group_level if s.auditor else '')})",
-                    "角色": s.role,
-                    "时间": f"{d2s(s.start_date)} ~ {d2s(s.end_date)}",
-                    "路线": f"{s.travel_from_city} → {s.travel_to_city}",
-                    "km": round(float(s.distance_km or 0), 1),
-                }
-            )
+    task_rows = []
+    for t in tasks:
+        task_rows.append({
+            "id": int(t.id),
+            "project_name": t.project_name or "",
+            "site_city": t.site_city or "",
+            "start_date": d2s(t.start_date),
+            "required_days": int(t.required_days or 1),
+            "required_headcount": int(t.required_headcount or 1),
+            "need_expert": bool(t.need_expert),
+        })
+    schedules_recent_rows = []
+    for s in schedules_recent:
+        schedules_recent_rows.append(
+            {
+                "ID": s.id,
+                "任务": f"#{s.task_id} {(s.task.project_name if s.task else '')}",
+                "人员": f"#{s.auditor_id} {(s.auditor.name if s.auditor else '')} ({(s.auditor.group_level if s.auditor else '')})",
+                "角色": s.role,
+                "时间": f"{d2s(s.start_date)} ~ {d2s(s.end_date)}",
+                "路线": f"{s.travel_from_city} → {s.travel_to_city}",
+                "km": round(float(s.distance_km or 0), 1),
+            }
+        )
+    return {"tasks": task_rows, "schedules_recent_rows": schedules_recent_rows}
+
+
+@st.cache_data(show_spinner=False, ttl=30)
+def load_calendar_page_payload(_data_version: int, year: int, month: int, auditor_id):
+    month_start = date(int(year), int(month), 1)
+    next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    month_end = next_month - timedelta(days=1)
+
+    with db_session() as db:
+        all_schedules = (
+            db.query(Schedule)
+            .options(joinedload(Schedule.task), joinedload(Schedule.auditor))
+            .filter(Schedule.start_date <= month_end, Schedule.end_date >= month_start)
+            .order_by(Schedule.start_date.asc())
+            .all()
+        )
+
+    ensure_extra_tables()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT da.id, da.task_id, da.auditor_id, da.person_name, da.is_part_time, da.role, da.start_date, da.end_date, da.notes,
+                       t.project_name, t.site_city
+                FROM direct_assignments da
+                LEFT JOIN tasks t ON da.task_id = t.id
+                WHERE da.start_date <= :month_end AND da.end_date >= :month_start
+                ORDER BY da.start_date ASC, da.person_name ASC
+            """),
+            {"month_start": d2s(month_start), "month_end": d2s(month_end)},
+        ).mappings().all()
+        direct_rows_raw = [dict(r) for r in rows]
+
+    direct_task_ids = {int(r["task_id"]) for r in direct_rows_raw}
+    all_schedules_rows = []
+    for s in all_schedules:
+        if int(s.task_id) in direct_task_ids:
+            continue
+        if auditor_id and s.auditor_id != auditor_id:
+            continue
+        all_schedules_rows.append(
+            {
+                "id": s.id,
+                "auditor_id": s.auditor_id,
+                "auditor_name": (s.auditor.name if s.auditor else ""),
+                "task_id": s.task_id,
+                "project_name": (s.task.project_name if s.task else ""),
+                "site_city": (s.task.site_city if s.task else ""),
+                "role": s.role,
+                "start_date": s.start_date,
+                "end_date": s.end_date,
+                "travel_from_city": s.travel_from_city,
+                "travel_to_city": s.travel_to_city,
+                "distance_km": float(s.distance_km or 0),
+                "source": "schedule",
+            }
+        )
+    return {
+        "month_start": month_start,
+        "month_end": month_end,
+        "direct_rows_raw": direct_rows_raw,
+        "all_schedules_rows": all_schedules_rows,
+    }
+
+# -------------------- 智能排班 --------------------
+if page == "智能排班":
+    st.subheader("智能排班")
+    st.caption("先按硬约束筛选，再按距离优先 + 适度负荷均衡评分推荐。")
+
+    payload = load_smart_page_payload(get_data_version())
+    tasks = payload["tasks"]
+    schedules_recent_rows = payload["schedules_recent_rows"]
 
     if not tasks:
         st.info("请先在【任务管理】中录入任务。")
     else:
         task_options = {
-            f"#{t.id} {t.project_name}｜{t.site_city}｜{d2s(t.start_date)}｜{t.required_days}天｜{t.required_headcount}人": t.id
+            f"#{t['id']} {t['project_name']}｜{t['site_city']}｜{t['start_date']}｜{t['required_days']}天｜{t['required_headcount']}人": t['id']
             for t in tasks
         }
         selected_label = st.selectbox("选择任务", list(task_options.keys()), key="smart_task_select")
@@ -2283,60 +2386,11 @@ elif page == "日历视图":
     month = c3.selectbox("月份", list(range(1, 13)), index=date.today().month - 1, key="cal_month")
     auditor_id = auditor_options[auditor_label]
 
-    month_start = date(int(year), int(month), 1)
-    next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
-    month_end = next_month - timedelta(days=1)
-
-    with db_session() as db:
-        all_schedules = (
-            db.query(Schedule)
-            .options(joinedload(Schedule.task), joinedload(Schedule.auditor))
-            .filter(Schedule.start_date <= month_end, Schedule.end_date >= month_start)
-            .order_by(Schedule.start_date.asc())
-            .all()
-        )
-
-    direct_rows_raw = []
-    ensure_extra_tables()
-    with engine.begin() as conn:
-        rows = conn.execute(
-            text("""
-                SELECT da.id, da.task_id, da.auditor_id, da.person_name, da.is_part_time, da.role, da.start_date, da.end_date, da.notes,
-                       t.project_name, t.site_city
-                FROM direct_assignments da
-                LEFT JOIN tasks t ON da.task_id = t.id
-                WHERE da.start_date <= :month_end AND da.end_date >= :month_start
-                ORDER BY da.start_date ASC, da.person_name ASC
-            """),
-            {"month_start": d2s(month_start), "month_end": d2s(month_end)},
-        ).mappings().all()
-        direct_rows_raw = [dict(r) for r in rows]
-
-    direct_task_ids = {int(r["task_id"]) for r in direct_rows_raw}
-    all_schedules_rows = []
-
-    for s in all_schedules:
-        if int(s.task_id) in direct_task_ids:
-            continue
-        if auditor_id and s.auditor_id != auditor_id:
-            continue
-        all_schedules_rows.append(
-            {
-                "id": s.id,
-                "auditor_id": s.auditor_id,
-                "auditor_name": (s.auditor.name if s.auditor else ""),
-                "task_id": s.task_id,
-                "project_name": (s.task.project_name if s.task else ""),
-                "site_city": (s.task.site_city if s.task else ""),
-                "role": s.role,
-                "start_date": s.start_date,
-                "end_date": s.end_date,
-                "travel_from_city": s.travel_from_city,
-                "travel_to_city": s.travel_to_city,
-                "distance_km": float(s.distance_km or 0),
-                "source": "schedule",
-            }
-        )
+    cal_payload = load_calendar_page_payload(get_data_version(), int(year), int(month), auditor_id)
+    month_start = cal_payload["month_start"]
+    month_end = cal_payload["month_end"]
+    direct_rows_raw = cal_payload["direct_rows_raw"]
+    all_schedules_rows = cal_payload["all_schedules_rows"]
 
     direct_rows = []
     for r in direct_rows_raw:
