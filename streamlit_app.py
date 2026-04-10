@@ -1,3 +1,4 @@
+from __future__ import annotations
 import csv
 import io
 import json
@@ -335,7 +336,7 @@ def save_direct_assignments_from_df(task_id: int, df_in):
     return ok, msg
 
 
-def sync_task_schedules_from_direct_assignments(task: Task):
+def sync_task_schedules_from_direct_assignments(task):
     return True, '已定项目人员已直接写入排班表，无需再次同步' 
 
 def _get_period_range(period_type: str, year: int, period_value: int):
