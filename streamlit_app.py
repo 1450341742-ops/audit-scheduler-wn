@@ -16,6 +16,50 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+
+# ---- defensive helper shim ----
+try:
+    ensure_extra_tables
+except NameError:
+    def ensure_extra_tables():
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS direct_assignments (
+                        id INTEGER PRIMARY KEY,
+                        task_id INTEGER NOT NULL,
+                        auditor_id INTEGER,
+                        person_name TEXT,
+                        is_part_time INTEGER NOT NULL DEFAULT 0,
+                        role TEXT,
+                        start_date TEXT NOT NULL,
+                        end_date TEXT NOT NULL,
+                        notes TEXT
+                    )
+                """))
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS monthly_targets (
+                        id INTEGER PRIMARY KEY,
+                        period_type TEXT NOT NULL,
+                        year INTEGER NOT NULL,
+                        period_value INTEGER NOT NULL,
+                        target_projects INTEGER NOT NULL DEFAULT 0,
+                        target_staffing INTEGER NOT NULL DEFAULT 0
+                    )
+                """))
+                conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS part_time_staff (
+                        id INTEGER PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        base_city TEXT,
+                        status TEXT DEFAULT 'active',
+                        note TEXT
+                    )
+                """))
+        except Exception:
+            pass
+
+
 from app.db import Base, SessionLocal, engine, ensure_schema, IS_SQLITE, IS_SQLITE
 from app.models import Auditor, Task, Schedule, CityDistance, City
 from app.scheduler import (
@@ -268,6 +312,297 @@ def normalize_text(v) -> str:
     except Exception:
         pass
     return str(v).strip()
+
+
+def ensure_extra_tables():
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS direct_assignments (
+                id INTEGER PRIMARY KEY,
+                task_id INTEGER NOT NULL,
+                auditor_id INTEGER,
+                person_name TEXT NOT NULL,
+                is_part_time INTEGER NOT NULL DEFAULT 0,
+                role TEXT NOT NULL DEFAULT 'member',
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                notes TEXT,
+                created_at TEXT
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS part_time_staff (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                base_city TEXT,
+                note TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS day_marks (
+                id INTEGER PRIMARY KEY,
+                date TEXT NOT NULL UNIQUE,
+                mark_type TEXT,
+                label TEXT
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS progress_targets (
+                id INTEGER PRIMARY KEY,
+                period_type TEXT NOT NULL,
+                year INTEGER NOT NULL,
+                period_value INTEGER NOT NULL DEFAULT 0,
+                target_projects INTEGER NOT NULL DEFAULT 0,
+                target_staffing INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT,
+                UNIQUE(period_type, year, period_value)
+            )
+        """))
+
+
+def parse_name_list(raw) -> list[str]:
+    s = normalize_text(raw)
+    if not s:
+        return []
+    for sep in ["，", "、", ";", "；", "/", "|", "\n", "\t"]:
+        s = s.replace(sep, ",")
+    out = []
+    seen = set()
+    for x in s.split(','):
+        x = str(x).strip()
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def load_day_marks() -> list[dict]:
+    globals().get("ensure_extra_tables", lambda: None)()
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT date, mark_type, label FROM day_marks ORDER BY date ASC")).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def get_part_time_staff_rows(active_only: bool = False) -> list[dict]:
+    globals().get("ensure_extra_tables", lambda: None)()
+    sql = "SELECT id, name, base_city, note, is_active, created_at FROM part_time_staff"
+    params = {}
+    if active_only:
+        sql += " WHERE is_active = 1"
+    sql += " ORDER BY is_active DESC, name ASC"
+    with engine.begin() as conn:
+        rows = conn.execute(text(sql), params).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def save_part_time_staff(name: str, base_city: str = '', note: str = '', is_active: bool = True):
+    globals().get("ensure_extra_tables", lambda: None)()
+    nm = normalize_text(name)
+    if not nm:
+        return False, '兼职姓名不能为空'
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with engine.begin() as conn:
+        exists = conn.execute(text("SELECT id FROM part_time_staff WHERE name=:name"), {'name': nm}).mappings().first()
+        if exists:
+            conn.execute(text("UPDATE part_time_staff SET base_city=:base_city, note=:note, is_active=:is_active WHERE name=:name"), {
+                'name': nm, 'base_city': normalize_text(base_city) or None, 'note': normalize_text(note) or None, 'is_active': 1 if is_active else 0
+            })
+            return True, '兼职人员已更新'
+        conn.execute(text("INSERT INTO part_time_staff (name, base_city, note, is_active, created_at) VALUES (:name, :base_city, :note, :is_active, :created_at)"), {
+            'name': nm, 'base_city': normalize_text(base_city) or None, 'note': normalize_text(note) or None, 'is_active': 1 if is_active else 0, 'created_at': now
+        })
+    return True, '兼职人员已保存'
+
+
+def delete_part_time_staff(row_id: int):
+    globals().get("ensure_extra_tables", lambda: None)()
+    with engine.begin() as conn:
+        exists = conn.execute(text('SELECT id FROM part_time_staff WHERE id=:id'), {'id': int(row_id)}).mappings().first()
+        if not exists:
+            return False, '兼职人员不存在'
+        conn.execute(text('DELETE FROM part_time_staff WHERE id=:id'), {'id': int(row_id)})
+    return True, '兼职人员已删除'
+
+
+def get_direct_assignments(task_id: int) -> list[dict]:
+    globals().get("ensure_extra_tables", lambda: None)()
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT id, task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, notes, created_at
+            FROM direct_assignments
+            WHERE task_id = :task_id
+            ORDER BY CASE WHEN role='leader' THEN 0 ELSE 1 END, start_date ASC, person_name ASC
+        """), {'task_id': int(task_id)}).mappings().all()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d['start_date'] = d.get('start_date') or ''
+        d['end_date'] = d.get('end_date') or ''
+        out.append(d)
+    return out
+
+
+def replace_direct_assignments(task_id: int, rows: list[dict]):
+    globals().get("ensure_extra_tables", lambda: None)()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with engine.begin() as conn:
+        conn.execute(text('DELETE FROM direct_assignments WHERE task_id=:task_id'), {'task_id': int(task_id)})
+        for r in rows or []:
+            sd = safe_parse_date(r.get('start_date'))
+            ed = safe_parse_date(r.get('end_date'))
+            person_name = normalize_text(r.get('person_name'))
+            if not person_name or not sd or not ed:
+                continue
+            if ed < sd:
+                ed = sd
+            conn.execute(text("""
+                INSERT INTO direct_assignments (task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, notes, created_at)
+                VALUES (:task_id, :auditor_id, :person_name, :is_part_time, :role, :start_date, :end_date, :notes, :created_at)
+            """), {
+                'task_id': int(task_id),
+                'auditor_id': int(r['auditor_id']) if r.get('auditor_id') else None,
+                'person_name': person_name,
+                'is_part_time': 1 if bool(r.get('is_part_time')) else 0,
+                'role': 'leader' if str(r.get('role')) == 'leader' else 'member',
+                'start_date': d2s(sd),
+                'end_date': d2s(ed),
+                'notes': normalize_text(r.get('notes')) or None,
+                'created_at': now,
+            })
+
+
+def save_direct_assignments_from_df(task_id: int, df_in):
+    with db_session() as db:
+        auditors = db.query(Auditor).all()
+        task = db.query(Task).filter(Task.id == int(task_id)).first()
+    if not task:
+        return False, '任务不存在'
+    auditor_name_to_id = {a.name: a.id for a in auditors}
+    rows_out = []
+    for _, r in pd.DataFrame(df_in).iterrows():
+        person_name = normalize_text(r.get('人员姓名'))
+        if not person_name:
+            continue
+        is_part_time = normalize_text(r.get('类型')) == '兼职'
+        sd = safe_parse_date(r.get('开始日期')) or task.start_date
+        ed = safe_parse_date(r.get('结束日期')) or task.end_date or task.start_date
+        rows_out.append({
+            'auditor_id': None if is_part_time else auditor_name_to_id.get(person_name),
+            'person_name': person_name,
+            'is_part_time': is_part_time,
+            'role': 'leader' if normalize_text(r.get('角色')) == '组长' else 'member',
+            'start_date': sd,
+            'end_date': ed,
+            'notes': normalize_text(r.get('备注')),
+        })
+    replace_direct_assignments(int(task_id), rows_out)
+    return True, '已定项目人员已保存'
+
+
+def sync_task_schedules_from_direct_assignments(task: Task):
+    direct_rows = get_direct_assignments(int(task.id))
+    internal_rows = [r for r in direct_rows if not bool(r.get('is_part_time')) and r.get('auditor_id')]
+    if not internal_rows:
+        return False, '当前仅有兼职人员，已保存直录信息，但没有可同步到系统排班表的内部稽查员'
+
+    with db_session() as db:
+        db.query(Schedule).filter(Schedule.task_id == int(task.id)).delete()
+        for r in internal_rows:
+            auditor = db.query(Auditor).filter(Auditor.id == int(r.get('auditor_id'))).first()
+            if not auditor:
+                continue
+            sd = safe_parse_date(r.get('start_date')) or task.start_date
+            ed = safe_parse_date(r.get('end_date')) or task.end_date or task.start_date
+            if ed < sd:
+                ed = sd
+            from_city = compute_from_city(auditor, task)
+            km = get_distance_km(db, from_city, task.site_city)
+            db.add(Schedule(
+                task_id=int(task.id),
+                auditor_id=int(auditor.id),
+                role='leader' if str(r.get('role')) == 'leader' else 'member',
+                start_date=sd,
+                end_date=ed,
+                travel_from_city=from_city,
+                travel_to_city=task.site_city,
+                distance_km=float(km),
+                score=0.0,
+                status='confirmed',
+            ))
+        if not safe_commit(db, f'同步已定项目人员到排班 task#{task.id}'):
+            return False, '同步失败'
+    return True, '已按已定项目人员同步到排班表'
+
+
+def _get_period_range(period_type: str, year: int, period_value: int):
+    year = int(year)
+    period_value = int(period_value or 0)
+    if period_type == 'monthly':
+        start_d = date(year, max(1, min(12, period_value)), 1)
+        end_d = ((start_d.replace(day=28) + timedelta(days=4)).replace(day=1)) - timedelta(days=1)
+        return start_d, end_d
+    if period_type == 'quarterly':
+        q = max(1, min(4, period_value))
+        start_month = (q - 1) * 3 + 1
+        start_d = date(year, start_month, 1)
+        end_month = start_month + 2
+        end_tmp = date(year, end_month, 28) + timedelta(days=4)
+        end_d = end_tmp.replace(day=1) - timedelta(days=1)
+        return start_d, end_d
+    return date(year, 1, 1), date(year, 12, 31)
+
+
+def get_target_row(period_type: str, year: int, period_value: int) -> dict:
+    globals().get("ensure_extra_tables", lambda: None)()
+    with engine.begin() as conn:
+        row = conn.execute(text("SELECT period_type, year, period_value, target_projects, target_staffing FROM progress_targets WHERE period_type=:period_type AND year=:year AND period_value=:period_value"), {
+            'period_type': str(period_type), 'year': int(year), 'period_value': int(period_value or 0)
+        }).mappings().first()
+    return dict(row) if row else {'period_type': period_type, 'year': int(year), 'period_value': int(period_value or 0), 'target_projects': 0, 'target_staffing': 0}
+
+
+def save_target_row(period_type: str, year: int, period_value: int, target_projects: int, target_staffing: int):
+    globals().get("ensure_extra_tables", lambda: None)()
+    params = {
+        'period_type': str(period_type), 'year': int(year), 'period_value': int(period_value or 0),
+        'target_projects': int(target_projects or 0), 'target_staffing': int(target_staffing or 0),
+        'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+    with engine.begin() as conn:
+        existing = conn.execute(text("SELECT id FROM progress_targets WHERE period_type=:period_type AND year=:year AND period_value=:period_value"), params).mappings().first()
+        if existing:
+            conn.execute(text("UPDATE progress_targets SET target_projects=:target_projects, target_staffing=:target_staffing, updated_at=:updated_at WHERE period_type=:period_type AND year=:year AND period_value=:period_value"), params)
+        else:
+            conn.execute(text("INSERT INTO progress_targets (period_type, year, period_value, target_projects, target_staffing, updated_at) VALUES (:period_type, :year, :period_value, :target_projects, :target_staffing, :updated_at)"), params)
+
+
+def get_progress_stats(period_type: str, year: int, period_value: int):
+    start_d, end_d = _get_period_range(period_type, year, period_value)
+    with db_session() as db:
+        tasks = db.query(Task).filter(Task.start_date >= start_d, Task.start_date <= end_d).order_by(Task.start_date.asc(), Task.id.asc()).all()
+        schedules = db.query(Schedule).filter(Schedule.start_date >= start_d, Schedule.start_date <= end_d).all()
+        actual_projects = len({int(t.id) for t in tasks})
+        actual_staffing = len(schedules)
+        staffing_map = {}
+        for s in schedules:
+            staffing_map[int(s.task_id)] = staffing_map.get(int(s.task_id), 0) + 1
+        detail_rows = []
+        for t in tasks:
+            detail_rows.append({
+                '任务ID': int(t.id),
+                '项目名称': t.project_name or '',
+                '客户': t.customer_name or '',
+                '城市': t.site_city or '',
+                '开始日期': d2s(t.start_date),
+                '结束日期': d2s(t.end_date or t.start_date),
+                '项目完成数': 1,
+                '人员安排数': int(staffing_map.get(int(t.id), 0)),
+                '需求人数': int(t.required_headcount or 0),
+                '需求天数': int(t.required_days or 0),
+            })
+    return start_d, end_d, actual_projects, actual_staffing, detail_rows
 
 
 def seed_city_distances_if_needed(db: Session):
@@ -732,7 +1067,7 @@ def get_calendar_payload(data_version: int, year: int, month: int, auditor_id: i
         )
 
     direct_rows_raw = []
-    ensure_extra_tables()
+    globals().get("ensure_extra_tables", lambda: None)()
     with engine.begin() as conn:
         rows = conn.execute(
             text("""
