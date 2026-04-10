@@ -9,9 +9,13 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
+import calendar
+import math
+from io import BytesIO
 
 import pandas as pd
 import streamlit as st
+from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -72,6 +76,12 @@ from app.scheduler import (
 from app.seed_distances import SEED_CITY_DISTANCES, CITY_COORDS
 
 APP_NAME = "万宁睿和稽查排班"
+PRESET_DISEASE_AREAS = [
+    "内分泌", "核药", "CAR-T", "慢性阻塞性肺疾病", "血管性痴呆", "结肠炎", "哮喘", "乳腺癌", "皮肤病",
+    "乙型肝炎", "实体瘤", "结核", "骨质疏松症", "肺癌", "帕金森", "失眠症", "CIPD", "特应性皮炎", "白血病"
+]
+PRESET_PROJECT_PHASES = ["IIb期", "Ⅲ期", "II期", "I期", "I 期", "II/III期", "I/IIa 期", "II 期"]
+
 st.set_page_config(page_title=APP_NAME, layout="wide")
 
 # -------------------- 上传控件中文化 --------------------
@@ -369,6 +379,14 @@ def ensure_extra_tables():
                 updated_at TEXT
             )
         """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS auditor_capacity_targets (
+                auditor_id INTEGER PRIMARY KEY,
+                min_monthly_cases INTEGER NOT NULL DEFAULT 4,
+                max_monthly_cases INTEGER NOT NULL DEFAULT 6,
+                updated_at TEXT
+            )
+        """))
         for ddl in [
             "ALTER TABLE direct_assignments ADD COLUMN project_name TEXT",
             "ALTER TABLE direct_assignments ADD COLUMN created_at TEXT",
@@ -380,6 +398,9 @@ def ensure_extra_tables():
             "ALTER TABLE task_attributes ADD COLUMN project_phase TEXT",
             "ALTER TABLE task_attributes ADD COLUMN disease_area TEXT",
             "ALTER TABLE task_attributes ADD COLUMN updated_at TEXT",
+            "ALTER TABLE auditor_capacity_targets ADD COLUMN min_monthly_cases INTEGER DEFAULT 4",
+            "ALTER TABLE auditor_capacity_targets ADD COLUMN max_monthly_cases INTEGER DEFAULT 6",
+            "ALTER TABLE auditor_capacity_targets ADD COLUMN updated_at TEXT",
         ]:
             try:
                 conn.execute(text(ddl))
@@ -437,6 +458,153 @@ def save_task_attributes(task_id: int, capital_type: str = "", project_phase: st
         updated = conn.execute(text("UPDATE task_attributes SET capital_type=:capital_type, project_phase=:project_phase, disease_area=:disease_area, updated_at=:updated_at WHERE task_id=:task_id"), params)
         if getattr(updated, "rowcount", 0) == 0:
             conn.execute(text("INSERT INTO task_attributes (task_id, capital_type, project_phase, disease_area, updated_at) VALUES (:task_id, :capital_type, :project_phase, :disease_area, :updated_at)"), params)
+
+
+
+
+def _preset_or_other(value: str, options: list[str]):
+    v = normalize_text(value)
+    if not v:
+        return "", ""
+    if v in options:
+        return v, ""
+    return "其他（手填）", v
+
+
+def _merge_preset_and_other(selected: str, other_text: str) -> str:
+    selected = normalize_text(selected)
+    other_text = normalize_text(other_text)
+    if selected == "其他（手填）":
+        return other_text
+    return selected
+
+
+def get_auditor_capacity_map(auditor_ids: list[int] | None = None) -> dict[int, dict]:
+    globals().get("ensure_extra_tables", lambda: None)()
+    sql = "SELECT auditor_id, min_monthly_cases, max_monthly_cases FROM auditor_capacity_targets"
+    params = {}
+    if auditor_ids:
+        sql += " WHERE auditor_id IN ({})".format(",".join([f":id{i}" for i, _ in enumerate(auditor_ids)]))
+        params = {f"id{i}": int(v) for i, v in enumerate(auditor_ids)}
+    with engine.begin() as conn:
+        rows = conn.execute(text(sql), params).mappings().all()
+    out = {int(r["auditor_id"]): dict(r) for r in rows}
+    for aid in auditor_ids or []:
+        out.setdefault(int(aid), {"auditor_id": int(aid), "min_monthly_cases": 4, "max_monthly_cases": 6})
+    return out
+
+
+def save_auditor_capacity_target(auditor_id: int, min_monthly_cases: int = 4, max_monthly_cases: int = 6):
+    globals().get("ensure_extra_tables", lambda: None)()
+    min_cases = max(0, int(min_monthly_cases or 0))
+    max_cases = max(min_cases, int(max_monthly_cases or 0))
+    params = {
+        "auditor_id": int(auditor_id),
+        "min_monthly_cases": min_cases,
+        "max_monthly_cases": max_cases,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    with engine.begin() as conn:
+        updated = conn.execute(text("UPDATE auditor_capacity_targets SET min_monthly_cases=:min_monthly_cases, max_monthly_cases=:max_monthly_cases, updated_at=:updated_at WHERE auditor_id=:auditor_id"), params)
+        if getattr(updated, "rowcount", 0) == 0:
+            conn.execute(text("INSERT INTO auditor_capacity_targets (auditor_id, min_monthly_cases, max_monthly_cases, updated_at) VALUES (:auditor_id, :min_monthly_cases, :max_monthly_cases, :updated_at)"), params)
+
+
+def get_subperiod_progress_rows(period_type: str, year: int, period_value: int):
+    rows = []
+    if period_type == "monthly":
+        start_d, end_d = _get_period_range(period_type, year, period_value)
+        cur = start_d
+        idx = 1
+        while cur <= end_d:
+            week_end = min(end_d, cur + timedelta(days=6))
+            w_target = get_target_row("weekly", year, int(cur.isocalendar().week)).get("target_projects", 0)
+            actual = 0
+            with db_session() as db:
+                task_rows = db.query(Task).filter(Task.start_date >= cur, Task.start_date <= week_end).all()
+                actual = len({int(t.id) for t in task_rows})
+            rows.append({"标签": f"第{idx}周", "目标院次": int(w_target or 0), "完成院次": int(actual or 0)})
+            cur = week_end + timedelta(days=1)
+            idx += 1
+    elif period_type == "quarterly":
+        start_month = (int(period_value) - 1) * 3 + 1
+        for m in range(start_month, start_month + 3):
+            target = get_target_row("monthly", year, m).get("target_projects", 0)
+            _, _, actual, _, _ = get_progress_stats("monthly", year, m)
+            rows.append({"标签": f"{m}月", "目标院次": int(target or 0), "完成院次": int(actual or 0)})
+    elif period_type == "yearly":
+        for m in range(1, 13):
+            target = get_target_row("monthly", year, m).get("target_projects", 0)
+            _, _, actual, _, _ = get_progress_stats("monthly", year, m)
+            q = (m - 1) // 3 + 1
+            rows.append({"标签": f"{m}月", "季度": f"Q{q}", "目标院次": int(target or 0), "完成院次": int(actual or 0)})
+    return rows
+
+
+def _pick_cn_font(size=18, bold=False):
+    candidates = [
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc" if bold else "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/arphic-gbsn00lp/gbsn00lp.ttf",
+        "/usr/share/fonts/truetype/arphic/uming.ttc",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def build_calendar_png_bytes(year: int, month: int, events_by_day: dict, day_marks: dict):
+    cell_w, cell_h = 230, 130
+    margin_x, margin_y = 30, 30
+    title_h, head_h = 80, 50
+    width = margin_x * 2 + cell_w * 7
+    height = margin_y * 2 + title_h + head_h + cell_h * 6 + 20
+    img = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(img)
+    font_title = _pick_cn_font(34, bold=True)
+    font_head = _pick_cn_font(18, bold=True)
+    font_day = _pick_cn_font(18, bold=True)
+    font_body = _pick_cn_font(14, bold=False)
+    draw.text((margin_x, margin_y), f"{year}年{month}月 排班日历", font=font_title, fill="#1f2937")
+    headers = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+    y0 = margin_y + title_h
+    for i, h in enumerate(headers):
+        x = margin_x + i * cell_w
+        draw.rectangle([x, y0, x + cell_w, y0 + head_h], outline="#d1d5db", width=1, fill="#f8fafc")
+        draw.text((x + 10, y0 + 12), h, font=font_head, fill="#374151")
+    month_start = date(year, month, 1)
+    first_cell = month_start - timedelta(days=month_start.weekday())
+    current = first_cell
+    for r in range(6):
+        for c in range(7):
+            x = margin_x + c * cell_w
+            y = y0 + head_h + r * cell_h
+            fill = "#ffffff" if current.month == month else "#f9fafb"
+            if events_by_day.get(current.isoformat()):
+                fill = "#eef6ff"
+            draw.rectangle([x, y, x + cell_w, y + cell_h], outline="#d1d5db", width=1, fill=fill)
+            draw.text((x + 8, y + 8), str(current.day), font=font_day, fill="#111827")
+            mark = day_marks.get(current.isoformat())
+            line_y = y + 34
+            if mark:
+                draw.text((x + 8, line_y), str(mark.get("label") or mark.get("type") or ""), font=font_body, fill="#16a34a")
+                line_y += 20
+            day_events = events_by_day.get(current.isoformat(), [])
+            show_events = day_events[:2]
+            for obj in show_events:
+                txt = f"• {obj.get('project','')} {'、'.join(obj.get('persons', []))}"
+                if len(txt) > 24:
+                    txt = txt[:24] + "…"
+                draw.text((x + 8, line_y), txt, font=font_body, fill="#1f2937")
+                line_y += 18
+            if len(day_events) > 2:
+                draw.text((x + 8, line_y), f"还有{len(day_events)-2}项…", font=font_body, fill="#6b7280")
+            current += timedelta(days=1)
+    bio = BytesIO()
+    img.save(bio, format="PNG")
+    return bio.getvalue()
 
 
 def load_day_marks() -> list[dict]:
@@ -767,6 +935,7 @@ def initialize_app_once():
 
 # -------------------- 权限 --------------------
 ALL_PAGES = [
+    "经营看板",
     "智能排班",
     "批量排班",
     "稽查员管理",
@@ -780,7 +949,7 @@ ALL_PAGES = [
     "账号管理",
     "数据清理",
 ]
-DEFAULT_NORMAL_PAGES = ["任务管理", "稽查员管理", "日历视图", "指标统计"]
+DEFAULT_NORMAL_PAGES = ["经营看板", "任务管理", "稽查员管理", "日历视图", "指标统计"]
 
 
 def hash_password(password: str) -> str:
@@ -1676,6 +1845,7 @@ page = st.sidebar.radio(
 )
 
 PAGE_SUBTITLES = {
+    "经营看板": "老板视角查看院次目标达成、人员负荷、项目结构与预警。",
     "智能排班": "按任务条件推荐团队，并支持确认排班。",
     "批量排班": "批量为任务生成推荐并快速落库。",
     "稽查员管理": "维护稽查员基础信息、负荷与带队能力。",
@@ -1697,6 +1867,244 @@ st.sidebar.caption(f"当前位置：{page}")
 if (not is_admin) and (page not in allowed_pages):
     st.error("当前账号无权限访问该板块，请联系主管理员开通。")
     st.stop()
+
+# -------------------- 经营看板 --------------------
+if page == "经营看板":
+    st.subheader("经营看板")
+    st.caption("老板视角总览院次达成、项目结构、人员负荷与风险预警。")
+
+    today_dt = date.today()
+    cy, cm = today_dt.year, today_dt.month
+    c1, c2, c3 = st.columns([1, 1, 1])
+    board_year = int(c1.number_input("看板年份", min_value=2024, max_value=2035, value=cy, step=1, key="board_year"))
+    board_month = int(c2.selectbox("看板月份", list(range(1, 13)), index=max(0, min(11, cm - 1)), key="board_month"))
+    board_scope = c3.selectbox("看板口径", ["monthly", "quarterly", "yearly"], format_func=lambda x: {"monthly":"月度总览","quarterly":"季度总览","yearly":"年度总览"}[x], key="board_scope")
+
+    if board_scope == "monthly":
+        scope_value = board_month
+    elif board_scope == "quarterly":
+        scope_value = ((board_month - 1) // 3) + 1
+    else:
+        scope_value = 0
+
+    start_d, end_d, actual_visits, _, detail_rows = get_progress_stats(board_scope, int(board_year), int(scope_value))
+    target_row = get_target_row(board_scope, int(board_year), int(scope_value))
+    target_visits = int(target_row.get("target_projects", 0) or 0)
+    completion_pct = round(actual_visits / target_visits * 100, 1) if target_visits else 0.0
+
+    cur_month_start, cur_month_end, cur_month_actual, _, _ = get_progress_stats("monthly", int(board_year), int(board_month))
+    cur_month_target = int((get_target_row("monthly", int(board_year), int(board_month)) or {}).get("target_projects", 0) or 0)
+    current_quarter = ((board_month - 1) // 3) + 1
+    q_start, q_end, cur_quarter_actual, _, _ = get_progress_stats("quarterly", int(board_year), int(current_quarter))
+    cur_quarter_target = int((get_target_row("quarterly", int(board_year), int(current_quarter)) or {}).get("target_projects", 0) or 0)
+    y_start, y_end, cur_year_actual, _, _ = get_progress_stats("yearly", int(board_year), 0)
+    cur_year_target = int((get_target_row("yearly", int(board_year), 0) or {}).get("target_projects", 0) or 0)
+
+    with db_session() as db:
+        schedules = db.query(Schedule).filter(Schedule.start_date <= end_d, Schedule.end_date >= start_d).all()
+        auditors = db.query(Auditor).order_by(Auditor.name.asc()).all()
+        tasks = db.query(Task).filter(Task.start_date >= start_d, Task.start_date <= end_d).all()
+
+    unique_task_ids = sorted({int(s.task_id) for s in schedules})
+    unique_auditor_ids = sorted({int(s.auditor_id) for s in schedules})
+    avg_members = round(len(schedules) / len(unique_task_ids), 1) if unique_task_ids else 0.0
+    detail_project_names = sorted({str(r.get("项目名称", "")).strip() for r in detail_rows if str(r.get("项目名称", "")).strip()})
+
+    capacity_map = get_auditor_capacity_map([int(a.id) for a in auditors]) if auditors else {}
+    total_days = max(1, (end_d - start_d).days + 1)
+    auditor_rows = []
+    overloaded_names = []
+    idle_risk_names = []
+    for a in auditors:
+        related = [s for s in schedules if int(s.auditor_id) == int(a.id)]
+        day_set = set()
+        task_ids = set()
+        for srec in related:
+            sd = max(start_d, srec.start_date)
+            ed = min(end_d, srec.end_date or srec.start_date)
+            cur = sd
+            while cur <= ed:
+                day_set.add(cur)
+                cur += timedelta(days=1)
+            task_ids.add(int(srec.task_id))
+        travel_days = len(day_set)
+        idle_days = max(0, total_days - travel_days)
+        completed_visits = len(task_ids)
+        cap_info = capacity_map.get(int(a.id), {"min_monthly_cases": 4, "max_monthly_cases": 6})
+        min_m = int(cap_info.get("min_monthly_cases", 4) or 4)
+        max_m = int(cap_info.get("max_monthly_cases", 6) or 6)
+        if board_scope == "monthly":
+            factor = 1
+        elif board_scope == "quarterly":
+            factor = 3
+        else:
+            factor = 12
+        std_min = round(min_m * factor, 1)
+        std_max = round(max_m * factor, 1)
+        std_mid = round((std_min + std_max) / 2, 1) if (std_min + std_max) else 0
+        load_pct_num = round(completed_visits / std_mid * 100, 1) if std_mid else 0.0
+        overload_pct_num = round(max(0.0, (completed_visits - std_max) / std_max * 100), 1) if std_max else 0.0
+        if completed_visits < std_min:
+            load_level = "偏低"
+            if idle_days >= max(5, total_days // 2):
+                idle_risk_names.append(a.name)
+        elif completed_visits <= std_max:
+            load_level = "正常"
+        else:
+            load_level = "超负荷"
+            overloaded_names.append(a.name)
+        auditor_rows.append({
+            "稽查员": a.name,
+            "已完成院次": completed_visits,
+            "出差天数": travel_days,
+            "空闲天数": idle_days,
+            "标准区间": f"{std_min}-{std_max}",
+            "负荷程度": load_level,
+            "负荷百分比": load_pct_num,
+            "超负荷百分比": overload_pct_num,
+        })
+
+    row1 = st.columns(5)
+    row1[0].metric("目标院次", target_visits)
+    row1[1].metric("已完成院次", actual_visits)
+    row1[2].metric("完成率", f"{completion_pct}%")
+    row1[3].metric("覆盖项目数", len(unique_task_ids), delta=len(detail_project_names) if detail_project_names else None)
+    row1[4].metric("投入稽查员", len(unique_auditor_ids), delta=f"人均{avg_members}" if avg_members else None)
+
+    row2 = st.columns(4)
+    month_pct = round(cur_month_actual / cur_month_target * 100, 1) if cur_month_target else 0.0
+    quarter_pct = round(cur_quarter_actual / cur_quarter_target * 100, 1) if cur_quarter_target else 0.0
+    year_pct = round(cur_year_actual / cur_year_target * 100, 1) if cur_year_target else 0.0
+    row2[0].metric(f"{board_year}年{board_month}月达成", f"{cur_month_actual}/{cur_month_target}", delta=f"{month_pct}%")
+    row2[1].metric(f"Q{current_quarter}季度达成", f"{cur_quarter_actual}/{cur_quarter_target}", delta=f"{quarter_pct}%")
+    row2[2].metric(f"{board_year}年度达成", f"{cur_year_actual}/{cur_year_target}", delta=f"{year_pct}%")
+    row2[3].metric("超负荷人数", len(overloaded_names), delta=f"闲置偏高{len(idle_risk_names)}人")
+
+    tab1, tab2, tab3, tab4 = st.tabs(["院次趋势", "人员负荷", "项目结构", "预警清单"])
+
+    with tab1:
+        st.markdown("**年度月度趋势**")
+        year_rows = []
+        for m in range(1, 13):
+            _, _, a_visits, _, _ = get_progress_stats("monthly", int(board_year), int(m))
+            t_row = get_target_row("monthly", int(board_year), int(m))
+            t_visits = int((t_row or {}).get("target_projects", 0) or 0)
+            year_rows.append({"月份": f"{m}月", "目标院次": t_visits, "完成院次": a_visits})
+        year_df = pd.DataFrame(year_rows)
+        st.bar_chart(year_df.set_index("月份")[["目标院次", "完成院次"]], use_container_width=True)
+
+        if board_scope == "monthly":
+            trend_rows = get_subperiod_progress_rows("monthly", int(board_year), int(board_month))
+            trend_title = f"{board_year}年{board_month}月周度完成"
+        elif board_scope == "quarterly":
+            trend_rows = get_subperiod_progress_rows("quarterly", int(board_year), int(scope_value))
+            trend_title = f"{board_year}年Q{scope_value}月度完成"
+        else:
+            trend_rows = get_subperiod_progress_rows("yearly", int(board_year), 0)
+            trend_title = f"{board_year}年度季度/月度完成"
+        st.markdown(f"**{trend_title}**")
+        if trend_rows:
+            trend_df = pd.DataFrame(trend_rows)
+            if "季度" in trend_df.columns:
+                trend_df["标签"] = trend_df["标签"] + " (" + trend_df["季度"] + ")"
+            st.line_chart(trend_df.set_index("标签")[["目标院次", "完成院次"]], use_container_width=True)
+            st.dataframe(trend_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("当前口径暂无趋势数据")
+
+        st.markdown("**本期项目明细**")
+        if detail_rows:
+            st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("当前口径暂无院次明细")
+
+    with tab2:
+        st.markdown("**人员负荷总览**")
+        if auditor_rows:
+            auditor_df = pd.DataFrame(auditor_rows).sort_values(["超负荷百分比", "已完成院次"], ascending=[False, False])
+            cpa, cpb, cpc = st.columns(3)
+            cpa.metric("平均出差天数", round(float(auditor_df["出差天数"].mean()), 1))
+            cpb.metric("平均空闲天数", round(float(auditor_df["空闲天数"].mean()), 1))
+            cpc.metric("平均负荷百分比", f"{round(float(auditor_df['负荷百分比'].mean()), 1)}%")
+            st.dataframe(auditor_df, use_container_width=True, hide_index=True)
+            st.markdown("**院次/出差天数对比**")
+            st.bar_chart(auditor_df.set_index("稽查员")[["已完成院次", "出差天数", "空闲天数"]], use_container_width=True)
+            st.markdown("**超负荷百分比 TOP10**")
+            top_over_df = auditor_df[["稽查员", "超负荷百分比"]].copy().sort_values("超负荷百分比", ascending=False).head(10)
+            st.bar_chart(top_over_df.set_index("稽查员"), use_container_width=True)
+        else:
+            st.info("当前口径暂无人员负荷数据")
+
+    with tab3:
+        st.markdown("**项目结构分析**")
+        attr_map = get_task_attribute_map([int(t.id) for t in tasks]) if tasks else {}
+        def _dist_frame_dashboard(key_name, label_name):
+            counter = {}
+            for t in tasks:
+                v = (attr_map.get(int(t.id), {}) or {}).get(key_name) or "未填写"
+                counter[v] = counter.get(v, 0) + 1
+            if not counter:
+                return pd.DataFrame(columns=[label_name, "项目数", "占比"])
+            total = sum(counter.values()) or 1
+            rows = [{label_name: k, "项目数": v, "占比": f"{round(v / total * 100, 1)}%"} for k, v in sorted(counter.items(), key=lambda x: (-x[1], x[0]))]
+            return pd.DataFrame(rows)
+
+        xa, xb, xc = st.columns(3)
+        with xa:
+            st.markdown("**内资/外资结构**")
+            dfa = _dist_frame_dashboard("capital_type", "类型")
+            st.dataframe(dfa, use_container_width=True, hide_index=True)
+            if not dfa.empty:
+                st.bar_chart(dfa.set_index("类型")["项目数"], use_container_width=True)
+        with xb:
+            st.markdown("**分期结构**")
+            dfb = _dist_frame_dashboard("project_phase", "分期")
+            st.dataframe(dfb, use_container_width=True, hide_index=True)
+            if not dfb.empty:
+                st.bar_chart(dfb.set_index("分期")["项目数"], use_container_width=True)
+        with xc:
+            st.markdown("**疾病领域结构**")
+            dfc = _dist_frame_dashboard("disease_area", "疾病领域")
+            st.dataframe(dfc, use_container_width=True, hide_index=True)
+            if not dfc.empty:
+                st.bar_chart(dfc.set_index("疾病领域")["项目数"], use_container_width=True)
+
+    with tab4:
+        st.markdown("**看板预警**")
+        alerts = []
+        if target_visits and completion_pct < 80:
+            alerts.append({"预警类型": "目标达成", "级别": "高", "说明": f"当前完成率仅 {completion_pct}% ，低于80%。"})
+        elif target_visits and completion_pct < 100:
+            alerts.append({"预警类型": "目标达成", "级别": "中", "说明": f"当前完成率 {completion_pct}% ，尚未达成目标。"})
+        if overloaded_names:
+            alerts.append({"预警类型": "人员负荷", "级别": "高", "说明": f"超负荷稽查员：{', '.join(overloaded_names[:8])}{'...' if len(overloaded_names) > 8 else ''}"})
+        if idle_risk_names:
+            alerts.append({"预警类型": "人员闲置", "级别": "中", "说明": f"空闲较高稽查员：{', '.join(idle_risk_names[:8])}{'...' if len(idle_risk_names) > 8 else ''}"})
+        attr_map = get_task_attribute_map([int(t.id) for t in tasks]) if tasks else {}
+        missing_attr_tasks = []
+        for t in tasks:
+            extra = attr_map.get(int(t.id), {}) or {}
+            miss = []
+            if not (extra.get("capital_type") or "").strip():
+                miss.append("内外资")
+            if not (extra.get("project_phase") or "").strip():
+                miss.append("分期")
+            if not (extra.get("disease_area") or "").strip():
+                miss.append("疾病领域")
+            if miss:
+                missing_attr_tasks.append(f"{t.project_name}（缺少：{'/'.join(miss)}）")
+        if missing_attr_tasks:
+            alerts.append({"预警类型": "项目信息", "级别": "中", "说明": "；".join(missing_attr_tasks[:8]) + ("..." if len(missing_attr_tasks) > 8 else "")})
+        no_team_task_names = []
+        for t in tasks:
+            if int(t.id) not in unique_task_ids:
+                no_team_task_names.append(str(t.project_name))
+        if no_team_task_names:
+            alerts.append({"预警类型": "排班覆盖", "级别": "中", "说明": f"当前口径内未见排班记录项目：{', '.join(no_team_task_names[:8])}{'...' if len(no_team_task_names) > 8 else ''}"})
+        if alerts:
+            st.dataframe(pd.DataFrame(alerts), use_container_width=True, hide_index=True)
+        else:
+            st.success("当前看板未发现明显风险预警。")
 
 # -------------------- 智能排班 --------------------
 if page == "智能排班":
@@ -2011,8 +2419,13 @@ elif page == "任务管理":
         start_date = c10.date_input("开始日期*", value=date.today())
         c11, c12, c13 = st.columns(3)
         capital_type = c11.selectbox("项目属性", ["", "内资", "外资"])
-        project_phase = c12.text_input("项目分期（如 I/II/III/BE）")
-        disease_area = c13.text_input("疾病领域")
+        project_phase_pick = c12.selectbox("项目分期", [""] + PRESET_PROJECT_PHASES + ["其他（手填）"], index=0)
+        disease_area_pick = c13.selectbox("疾病领域", [""] + PRESET_DISEASE_AREAS + ["其他（手填）"], index=0)
+        c14, c15 = st.columns(2)
+        project_phase_other = c14.text_input("其他分期（可空）") if project_phase_pick == "其他（手填）" else ""
+        disease_area_other = c15.text_input("其他疾病领域（可空）") if disease_area_pick == "其他（手填）" else ""
+        project_phase = _merge_preset_and_other(project_phase_pick, project_phase_other)
+        disease_area = _merge_preset_and_other(disease_area_pick, disease_area_other)
         default_end = start_date + timedelta(days=max(1, int(required_days)) - 1)
         end_date = st.date_input("结束日期*", value=default_end)
 
@@ -2110,8 +2523,15 @@ elif page == "任务管理":
                 edit_start_date = c10.date_input("开始日期*", value=selected_task.start_date or date.today())
                 c11, c12, c13 = st.columns(3)
                 edit_capital_type = c11.selectbox("项目属性", ["", "内资", "外资"], index=["", "内资", "外资"].index((selected_task_attrs.get("capital_type") or "") if (selected_task_attrs.get("capital_type") or "") in ["", "内资", "外资"] else ""))
-                edit_project_phase = c12.text_input("项目分期", value=selected_task_attrs.get("project_phase") or "")
-                edit_disease_area = c13.text_input("疾病领域", value=selected_task_attrs.get("disease_area") or "")
+                _phase_pick, _phase_other = _preset_or_other(selected_task_attrs.get("project_phase") or "", PRESET_PROJECT_PHASES)
+                _disease_pick, _disease_other = _preset_or_other(selected_task_attrs.get("disease_area") or "", PRESET_DISEASE_AREAS)
+                edit_project_phase_pick = c12.selectbox("项目分期", [""] + PRESET_PROJECT_PHASES + ["其他（手填）"], index=([""] + PRESET_PROJECT_PHASES + ["其他（手填）"]).index(_phase_pick if _phase_pick in ([""] + PRESET_PROJECT_PHASES + ["其他（手填）"]) else ""))
+                edit_disease_area_pick = c13.selectbox("疾病领域", [""] + PRESET_DISEASE_AREAS + ["其他（手填）"], index=([""] + PRESET_DISEASE_AREAS + ["其他（手填）"]).index(_disease_pick if _disease_pick in ([""] + PRESET_DISEASE_AREAS + ["其他（手填）"]) else ""))
+                c14, c15 = st.columns(2)
+                edit_project_phase_other = c14.text_input("其他分期（可空）", value=_phase_other) if edit_project_phase_pick == "其他（手填）" else ""
+                edit_disease_area_other = c15.text_input("其他疾病领域（可空）", value=_disease_other) if edit_disease_area_pick == "其他（手填）" else ""
+                edit_project_phase = _merge_preset_and_other(edit_project_phase_pick, edit_project_phase_other)
+                edit_disease_area = _merge_preset_and_other(edit_disease_area_pick, edit_disease_area_other)
                 edit_end_date = st.date_input("结束日期*", value=selected_task.end_date or edit_start_date)
 
                 b1, b2 = st.columns(2)
@@ -2197,7 +2617,7 @@ elif page == "任务管理":
                     num_rows="dynamic",
                     key=f"direct_assign_editor_{selected_task.id}",
                     column_config={
-                        "项目名称": st.column_config.TextColumn(disabled=True),
+                        "项目名称": st.column_config.TextColumn(help="支持查看或补充项目名称"),
                         "类型": st.column_config.SelectboxColumn(options=["内部稽查员", "兼职"]),
                         "人员姓名": st.column_config.TextColumn(help="内部稽查员可填写系统内姓名；兼职可填写兼职库姓名"),
                         "角色": st.column_config.SelectboxColumn(options=["组长", "成员"]),
@@ -2260,7 +2680,7 @@ elif page == "任务管理":
 # -------------------- 页面：指标统计 --------------------
 elif page == "指标统计":
     st.subheader("指标统计")
-    st.caption("按周、月、季、年录入目标院次，并自动统计完成院次、完成率、稽查员出差/空闲/超负荷情况，以及项目属性分布。")
+    st.caption("按周、月、季、年录入目标院次，自动统计完成率、趋势图、稽查员出差/空闲/负荷情况，以及项目属性分布。")
 
     c1, c2, c3 = st.columns(3)
     period_type = c1.selectbox("统计周期", ["weekly", "monthly", "quarterly", "yearly"], format_func=lambda x: {"weekly":"周度","monthly":"月度","quarterly":"季度","yearly":"年度"}[x])
@@ -2304,6 +2724,15 @@ elif page == "指标统计":
     coly.metric("已完成院次", actual_visits)
     colz.metric("完成率", f"{completion_pct}%")
 
+    sub_rows = get_subperiod_progress_rows(period_type, int(year), int(period_value))
+    if sub_rows:
+        st.subheader("完成趋势图")
+        chart_df = pd.DataFrame(sub_rows)
+        if period_type == "yearly" and "季度" in chart_df.columns:
+            chart_df["标签"] = chart_df["标签"] + " (" + chart_df["季度"] + ")"
+        st.bar_chart(chart_df.set_index("标签")[["目标院次", "完成院次"]], use_container_width=True)
+        st.dataframe(chart_df, use_container_width=True, hide_index=True)
+
     st.subheader("院次完成明细")
     if detail_rows:
         st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
@@ -2315,9 +2744,40 @@ elif page == "指标统计":
         auditors = db.query(Auditor).order_by(Auditor.name.asc()).all()
         tasks = db.query(Task).filter(Task.start_date >= start_d, Task.start_date <= end_d).all()
 
+    capacity_map = get_auditor_capacity_map([int(a.id) for a in auditors]) if auditors else {}
+    st.subheader("稽查员月度院次标准设置")
+    cap_df = pd.DataFrame([
+        {
+            "稽查员": a.name,
+            "最小标准": int((capacity_map.get(int(a.id), {}) or {}).get("min_monthly_cases", 4) or 4),
+            "最大标准": int((capacity_map.get(int(a.id), {}) or {}).get("max_monthly_cases", 6) or 6),
+        }
+        for a in auditors
+    ])
+    if not cap_df.empty:
+        edited_cap = st.data_editor(
+            cap_df,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            key="auditor_capacity_editor",
+            column_config={
+                "最小标准": st.column_config.NumberColumn(min_value=0, step=1),
+                "最大标准": st.column_config.NumberColumn(min_value=0, step=1),
+            },
+        )
+        if st.button("保存稽查员月度院次标准", type="primary"):
+            name_to_id = {a.name: int(a.id) for a in auditors}
+            for _, r in pd.DataFrame(edited_cap).iterrows():
+                aid = name_to_id.get(str(r.get("稽查员", "")).strip())
+                if aid:
+                    save_auditor_capacity_target(aid, _safe_int(r.get("最小标准"), 4), _safe_int(r.get("最大标准"), 6))
+            clear_runtime_caches_after_data_change()
+            st.success("稽查员月度院次标准已保存")
+            st.rerun()
+
     auditor_rows = []
     total_days = max(1, (end_d - start_d).days + 1)
-    task_by_id = {int(t.id): t for t in tasks}
     for a in auditors:
         related = [s for s in schedules if int(s.auditor_id) == int(a.id)]
         day_set = set()
@@ -2333,28 +2793,46 @@ elif page == "指标统计":
         travel_days = len(day_set)
         idle_days = max(0, total_days - travel_days)
         completed_visits = len(task_ids)
-        monthly_capacity = int(getattr(a, "monthly_cases", 0) or 0)
+        cap_info = capacity_map.get(int(a.id), {"min_monthly_cases": 4, "max_monthly_cases": 6})
+        min_m = int(cap_info.get("min_monthly_cases", 4) or 4)
+        max_m = int(cap_info.get("max_monthly_cases", 6) or 6)
         if period_type == "weekly":
-            capacity = round(monthly_capacity / 4, 2)
+            factor = 0.25
         elif period_type == "monthly":
-            capacity = monthly_capacity
+            factor = 1
         elif period_type == "quarterly":
-            capacity = monthly_capacity * 3
+            factor = 3
         else:
-            capacity = monthly_capacity * 12
-        overload_pct = round(max(0.0, (completed_visits - capacity) / capacity * 100), 1) if capacity else 0.0
+            factor = 12
+        std_min = round(min_m * factor, 1)
+        std_max = round(max_m * factor, 1)
+        std_mid = round((std_min + std_max) / 2, 1)
+        load_pct = round(completed_visits / std_mid * 100, 1) if std_mid else 0.0
+        overload_pct = round(max(0.0, (completed_visits - std_max) / std_max * 100), 1) if std_max else 0.0
+        if completed_visits < std_min:
+            load_level = "偏低"
+        elif completed_visits <= std_max:
+            load_level = "正常"
+        else:
+            load_level = "超负荷"
         auditor_rows.append({
             "稽查员": a.name,
             "已完成院次": completed_visits,
             "出差天数": travel_days,
             "空闲天数": idle_days,
+            "月度标准": f"{min_m}-{max_m}",
+            "折算标准": f"{std_min}-{std_max}",
+            "负荷程度": load_level,
+            "负荷百分比": f"{load_pct}%",
             "超负荷百分比": f"{overload_pct}%",
-            "参考容量": capacity,
         })
 
     st.subheader("稽查员效率统计")
     if auditor_rows:
-        st.dataframe(pd.DataFrame(auditor_rows), use_container_width=True, hide_index=True)
+        auditor_df = pd.DataFrame(auditor_rows)
+        st.dataframe(auditor_df, use_container_width=True, hide_index=True)
+        plot_df = auditor_df[["稽查员", "已完成院次", "出差天数", "空闲天数"]].set_index("稽查员")
+        st.bar_chart(plot_df, use_container_width=True)
     else:
         st.info("暂无稽查员统计数据")
 
@@ -2374,13 +2852,22 @@ elif page == "指标统计":
     ca, cb, cc = st.columns(3)
     with ca:
         st.markdown("**内资/外资占比**")
-        st.dataframe(_dist_frame("capital_type"), use_container_width=True, hide_index=True)
+        dfa = _dist_frame("capital_type")
+        st.dataframe(dfa, use_container_width=True, hide_index=True)
+        if not dfa.empty:
+            st.bar_chart(dfa.set_index("capital_type")["院次"], use_container_width=True)
     with cb:
         st.markdown("**项目分期占比**")
-        st.dataframe(_dist_frame("project_phase"), use_container_width=True, hide_index=True)
+        dfb = _dist_frame("project_phase")
+        st.dataframe(dfb, use_container_width=True, hide_index=True)
+        if not dfb.empty:
+            st.bar_chart(dfb.set_index("project_phase")["院次"], use_container_width=True)
     with cc:
         st.markdown("**疾病领域占比**")
-        st.dataframe(_dist_frame("disease_area"), use_container_width=True, hide_index=True)
+        dfc = _dist_frame("disease_area")
+        st.dataframe(dfc, use_container_width=True, hide_index=True)
+        if not dfc.empty:
+            st.bar_chart(dfc.set_index("disease_area")["院次"], use_container_width=True)
 
 # -------------------- 页面：兼职库 --------------------
 elif page == "兼职库":
@@ -2771,7 +3258,7 @@ elif page == "模板导入":
 # -------------------- 日历视图 --------------------
 elif page == "日历视图":
     st.subheader("日历视图")
-    st.caption("按月查看排班、节假日标识，并支持导出 ICS 日历。")
+    st.caption("按月查看排班，支持折叠展示、月历图片下载与排班明细维护。")
 
     data_version = int(st.session_state.get("data_version", 0))
     c1, c2, c3 = st.columns(3)
@@ -2790,6 +3277,14 @@ elif page == "日历视图":
     merged_rows = payload["merged_rows"]
     day_marks = payload["day_marks"]
     events_by_day = payload["events_by_day"]
+
+    cal_png = build_calendar_png_bytes(int(year), int(month), events_by_day, day_marks)
+    st.download_button(
+        "下载当月日历图片PNG",
+        data=cal_png,
+        file_name=f"排班日历_{year}_{month:02d}.png",
+        mime="image/png",
+    )
 
     st.subheader(f"{year}年{month}月 日历总览")
     weeks = []
@@ -2814,18 +3309,23 @@ elif page == "日历视图":
             if mk:
                 marks.append(mk.get("label") or mk.get("type") or "标记")
             day_events = events_by_day.get(day.isoformat(), [])
-            evs = [f"#{obj['task_id']} {obj['project']}｜{'、'.join(obj['persons'])}" for obj in day_events]
+            show_events = []
+            for obj in day_events[:2]:
+                txt = f"(定){obj['project']}｜{'、'.join(obj['persons'])}"
+                if len(txt) > 26:
+                    txt = txt[:26] + "…"
+                show_events.append(txt)
             color = "#ffffff"
             if day.month != month:
                 color = "#f7f7f7"
-            elif evs:
+            elif show_events:
                 color = "#eef6ff"
             cols[idx].markdown(
-                f"<div style='border:1px solid #ddd;border-radius:8px;padding:8px;min-height:120px;background:{color};'>"
-                f"<div style='font-weight:600'>{day.day}</div>"
-                + (f"<div style='color:#d97706;font-size:12px'>{' / '.join(marks)}</div>" if marks else "")
-                + ("" if not evs else "".join([f"<div style='font-size:12px;margin-top:4px'>{e}</div>" for e in evs[:3]]))
-                + (f"<div style='font-size:12px;color:#666'>还有 {len(evs)-3} 项</div>" if len(evs) > 3 else "")
+                f"<div style='border:1px solid #ddd;border-radius:10px;padding:8px;min-height:116px;background:{color};overflow:hidden;'>"
+                f"<div style='font-weight:700;margin-bottom:2px'>{day.day}</div>"
+                + (f"<div style='color:#16a34a;font-size:12px;margin-bottom:2px'>{' / '.join(marks)}</div>" if marks else "")
+                + ("" if not show_events else "".join([f"<div style='font-size:12px;line-height:1.35;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>{e}</div>" for e in show_events]))
+                + (f"<div style='font-size:12px;color:#666;margin-top:4px'>还有 {len(day_events)-2} 项…</div>" if len(day_events) > 2 else "")
                 + "</div>",
                 unsafe_allow_html=True,
             )
@@ -2864,28 +3364,23 @@ elif page == "日历视图":
         direct_task_label = st.selectbox("选择任务", list(direct_task_options.keys()), key="edit_direct_task_select")
         direct_task_id = int(direct_task_options[direct_task_label])
         direct_assignments = get_direct_assignments(direct_task_id)
-        edit_df = pd.DataFrame([
-            {
-                "ID": r.get("id"),
-                "类型": "兼职" if bool(r.get("is_part_time")) else "内部稽查员",
-                "人员姓名": r.get("person_name") or "",
-                "角色": "组长" if str(r.get("role")) == "leader" else "成员",
-                "开始日期": str(r.get("start_date") or ""),
-                "结束日期": str(r.get("end_date") or ""),
-                "备注": r.get("notes") or "",
-            }
-            for r in direct_assignments
-        ])
         edited = st.data_editor(
-            edit_df,
+            pd.DataFrame([
+                {
+                    "项目名称": r.get("project_name", "") or "",
+                    "类型": "兼职" if bool(r.get("is_part_time")) else "内部稽查员",
+                    "人员姓名": r.get("person_name", "") or "",
+                    "角色": "组长" if str(r.get("role", "")) == "leader" else "成员",
+                    "开始日期": str(r.get("start_date", "")),
+                    "结束日期": str(r.get("end_date", "")),
+                    "备注": r.get("notes", "") or "",
+                }
+                for r in direct_assignments
+            ]),
             use_container_width=True,
+            hide_index=True,
             num_rows="dynamic",
             key="direct_assignment_editor",
-            column_config={
-                "ID": st.column_config.NumberColumn(disabled=True),
-                "类型": st.column_config.SelectboxColumn(options=["内部稽查员", "兼职"]),
-                "角色": st.column_config.SelectboxColumn(options=["组长", "成员"]),
-            },
         )
         if st.button("保存已定项目人员修改", type="primary", key="save_direct_assignments_btn"):
             ok, msg = save_direct_assignments_from_df(direct_task_id, edited)
@@ -2895,165 +3390,3 @@ elif page == "日历视图":
                 st.rerun()
             else:
                 st.error(msg)
-
-    st.divider()
-    st.subheader("导出 ICS 日历")
-    all_ics = build_ics_events_cached(data_version, auditor_id=None)
-    st.download_button("导出全部 ICS 日历", all_ics, file_name="wnrh_all.ics", key="dl_all_ics")
-    if auditor_id:
-        one_ics = build_ics_events_cached(data_version, auditor_id=auditor_id)
-        st.download_button("导出当前稽查员 ICS 日历", one_ics, file_name=f"wnrh_auditor_{auditor_id}.ics", key="dl_one_ics")
-
-# -------------------- 账号管理 --------------------
-# -------------------- 账号管理 --------------------
-elif page == "账号管理":
-    st.subheader("账号管理")
-    current_user = st.session_state.get("login_user", "")
-    is_admin = bool(st.session_state.get("is_admin", False))
-    is_super_admin = bool(st.session_state.get("is_super_admin", False))
-
-    st.subheader("我的密码")
-    with st.form("change_my_password", clear_on_submit=True):
-        old_pw = st.text_input("当前密码", type="password")
-        new_pw = st.text_input("新密码（至少6位）", type="password")
-        new_pw2 = st.text_input("确认新密码", type="password")
-        if st.form_submit_button("修改我的密码", type="primary"):
-            if not check_login(current_user, old_pw):
-                st.error("当前密码不正确")
-            elif new_pw != new_pw2:
-                st.error("两次输入的新密码不一致")
-            else:
-                ok, msg = update_auth_password(current_user, new_pw)
-                if ok:
-                    st.success(msg)
-                else:
-                    st.error(msg)
-
-    st.divider()
-    if not is_admin:
-        st.info("当前账号仅可修改自己的密码。新增登录人员、重置他人密码、配置可见板块仅管理员可操作。")
-    else:
-        st.subheader("新增登录人员")
-        with st.form("create_user_form", clear_on_submit=True):
-            c1, c2, c3 = st.columns(3)
-            new_username = c1.text_input("新账号")
-            new_password = c2.text_input("初始密码（至少6位）", type="password")
-            role = c3.selectbox("权限", ["普通用户", "管理员", "主管理员"])
-            if st.form_submit_button("新增账号", type="primary"):
-                ok, msg = create_auth_user(
-                    new_username,
-                    new_password,
-                    is_admin=(role in ("管理员", "主管理员")),
-                    is_super_admin=(role == "主管理员"),
-                )
-                if ok:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
-
-        st.subheader("现有登录账号")
-        users = list_auth_users()
-        if users:
-            rows = []
-            for u in users:
-                role_cn = "普通用户"
-                if int(u.get("is_super_admin", 0)) == 1:
-                    role_cn = "主管理员"
-                elif int(u.get("is_admin", 0)) == 1:
-                    role_cn = "管理员"
-                rows.append({"账号": u.get("username"), "权限": role_cn, "创建时间": u.get("created_at") or ""})
-            show_table(rows, 260)
-        else:
-            st.info("暂无账号")
-
-        st.subheader("重置其他人员密码")
-        user_labels = [u["username"] for u in users]
-        if user_labels:
-            with st.form("reset_password_form", clear_on_submit=True):
-                c1, c2 = st.columns(2)
-                reset_user = c1.selectbox("选择账号", user_labels)
-                reset_pw = c2.text_input("新密码（至少6位）", type="password")
-                if st.form_submit_button("重置密码"):
-                    ok, msg = update_auth_password(reset_user, reset_pw)
-                    if ok:
-                        st.success(f"{reset_user}：{msg}")
-                    else:
-                        st.error(msg)
-
-            st.subheader("删除登录账号")
-            deletable = [u for u in user_labels if u not in ("admin", current_user)]
-            if deletable:
-                with st.form("delete_user_form", clear_on_submit=True):
-                    del_user = st.selectbox("选择要删除的账号", deletable)
-                    confirm_text = st.text_input("输入 DELETE 确认删除")
-                    if st.form_submit_button("删除账号"):
-                        if confirm_text != "DELETE":
-                            st.error("请输入 DELETE 以确认删除")
-                        else:
-                            ok, msg = delete_auth_user(del_user, current_user)
-                            if ok:
-                                st.success(msg)
-                                st.rerun()
-                            else:
-                                st.error(msg)
-
-        st.divider()
-        if not is_super_admin:
-            st.info("提示：只有【主管理员】可以配置普通账号的可见板块。")
-        else:
-            st.subheader("普通账号可见板块配置（主管理员）")
-            st.caption("勾选后保存：普通账号侧边栏仅显示被勾选的功能。管理员/主管理员默认全功能，不受此限制。")
-
-            normal_users = []
-            for u in users:
-                if int(u.get("is_admin", 0)) == 1:
-                    continue
-                normal_users.append(u.get("username"))
-
-            if not normal_users:
-                st.info("暂无普通账号")
-            else:
-                target_user = st.selectbox("选择普通账号", normal_users, key="perm_target_user")
-                current_pages = get_user_allowed_pages(target_user)
-                selected_pages = st.multiselect(
-                    "可见板块（勾选）",
-                    options=ALL_PAGES,
-                    default=current_pages,
-                    key="perm_pages_multiselect",
-                )
-                c1, _ = st.columns([1, 3])
-                if c1.button("保存可见板块", type="primary", key="save_perm_btn"):
-                    ok, msg = set_user_allowed_pages(target_user, selected_pages)
-                    if ok:
-                        st.success(msg)
-                        if str(target_user).strip() == str(current_user).strip():
-                            st.session_state["allowed_pages"] = get_user_allowed_pages(current_user)
-                        st.rerun()
-                    else:
-                        st.error(msg)
-
-# -------------------- 数据清理 --------------------
-elif page == "数据清理":
-    st.subheader("数据清理")
-    st.warning("当前无数据时，可直接清空所有业务表。此操作不可恢复。")
-    with st.form("cleanup_form"):
-        confirm = st.text_input("输入 CLEAR 确认清空")
-        submitted = st.form_submit_button("清空全部业务数据", type="primary")
-    if submitted:
-        if confirm != "CLEAR":
-            st.error("请输入 CLEAR")
-        else:
-            with db_session() as db:
-                db.query(Schedule).delete()
-                db.query(Task).delete()
-                db.query(Auditor).delete()
-                db.query(CityDistance).delete()
-                db.query(City).delete()
-                if safe_commit(db, "清空业务数据"):
-                    clear_runtime_caches_after_data_change()
-                    st.success("已清空")
-                    st.rerun()
-
-else:
-    st.info("请选择左侧功能导航。")
