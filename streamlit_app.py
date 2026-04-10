@@ -9,7 +9,6 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
-import matplotlib.pyplot as plt
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import joinedload
