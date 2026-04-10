@@ -49,7 +49,6 @@ from app.scheduler import (
     compute_from_city,
     get_distance_km,
     team_objective,
-    TeamProposal,
 )
 
 
