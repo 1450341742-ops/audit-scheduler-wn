@@ -561,6 +561,14 @@ def seed_cities_if_needed(db: Session):
     safe_commit(db, "初始化城市坐标")
 
 
+
+try:
+    bootstrap_auth_users_if_needed
+except NameError:
+    def bootstrap_auth_users_if_needed():
+        return None
+
+
 @st.cache_resource(show_spinner=False)
 def initialize_app_once():
     Base.metadata.create_all(bind=engine)
