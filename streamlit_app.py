@@ -922,9 +922,7 @@ def build_ics_events(db: Session, auditor_id: int | None = None):
         end_exclusive = datetime.combine(actual_end + timedelta(days=1), datetime.min.time()).replace(hour=18)
         uid = f"wnrh-{s.id}@scheduler"
         summary = f"{t.project_name}｜{t.site_city}｜{s.role}"
-        desc = f"客户:{t.customer_name or ''}
-人数:{t.required_headcount} 天数:{t.required_days}
-负责人/成员:{a.name}"
+        desc = f"客户:{t.customer_name or ''}\n人数:{t.required_headcount} 天数:{t.required_days}\n负责人/成员:{a.name}"
         events.extend(
             [
                 "BEGIN:VEVENT",
