@@ -638,23 +638,43 @@ def save_target_row(period_type: str, year: int, period_value: int, target_proje
         'target_projects': int(target_projects or 0), 'target_staffing': int(target_staffing or 0),
         'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     }
-    update_sql = text("UPDATE progress_targets SET target_projects=:target_projects, target_staffing=:target_staffing, updated_at=:updated_at WHERE period_type=:period_type AND year=:year AND period_value=:period_value")
-    insert_sql = text("INSERT INTO progress_targets (period_type, year, period_value, target_projects, target_staffing, updated_at) VALUES (:period_type, :year, :period_value, :target_projects, :target_staffing, :updated_at)")
     from sqlalchemy.exc import SQLAlchemyError
     try:
         with engine.begin() as conn:
-            result = conn.execute(update_sql, params)
-            if int(getattr(result, 'rowcount', 0) or 0) == 0:
-                conn.execute(insert_sql, params)
-        return True
-    except SQLAlchemyError:
-        try:
-            with engine.begin() as conn:
-                conn.execute(update_sql, params)
-            return True
-        except SQLAlchemyError as e:
-            st.error(f"保存指标失败：{e}")
-            return False
+            existing = conn.execute(
+                text("SELECT id FROM progress_targets WHERE period_type=:period_type AND year=:year AND period_value=:period_value"),
+                {
+                    'period_type': params['period_type'],
+                    'year': params['year'],
+                    'period_value': params['period_value'],
+                },
+            ).mappings().first()
+
+            if existing and existing.get('id') is not None:
+                conn.execute(
+                    text("UPDATE progress_targets SET target_projects=:target_projects, target_staffing=:target_staffing, updated_at=:updated_at WHERE id=:id"),
+                    {
+                        'id': int(existing['id']),
+                        'target_projects': params['target_projects'],
+                        'target_staffing': params['target_staffing'],
+                        'updated_at': params['updated_at'],
+                    },
+                )
+            else:
+                next_id = conn.execute(text("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM progress_targets")).scalar() or 1
+                conn.execute(
+                    text("INSERT INTO progress_targets (id, period_type, year, period_value, target_projects, target_staffing, updated_at) VALUES (:id, :period_type, :year, :period_value, :target_projects, :target_staffing, :updated_at)"),
+                    {
+                        'id': int(next_id),
+                        **params,
+                    },
+                )
+
+        saved = get_target_row(params['period_type'], params['year'], params['period_value'])
+        return int(saved.get('target_projects', 0) or 0) == int(params['target_projects'])
+    except SQLAlchemyError as e:
+        st.error(f"保存指标失败：{e}")
+        return False
 
 
 def get_progress_stats(period_type: str, year: int, period_value: int):
@@ -2259,9 +2279,12 @@ elif page == "指标统计":
     with st.form("target_form", clear_on_submit=False):
         target_projects = st.number_input("目标院次数量", min_value=0, value=int(target.get("target_projects", 0) or 0), step=1)
         if st.form_submit_button("保存院次指标", type="primary"):
-            save_target_row(period_type, int(year), int(period_value), int(target_projects), 0)
-            st.success("院次指标已保存")
-            st.rerun()
+            ok = save_target_row(period_type, int(year), int(period_value), int(target_projects), 0)
+            if ok:
+                st.success("院次指标已保存")
+                st.rerun()
+            else:
+                st.error("院次指标保存失败，请重试")
 
     start_d, end_d, actual_visits, _, detail_rows = get_progress_stats(period_type, int(year), int(period_value))
     target = get_target_row(period_type, int(year), int(period_value))
