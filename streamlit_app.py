@@ -41,6 +41,19 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 
+from app.db import Base, SessionLocal, engine, ensure_schema, IS_SQLITE
+from app.models import Auditor, Task, Schedule, CityDistance, City
+from app.scheduler import (
+    build_candidates,
+    propose_team,
+    compute_from_city,
+    get_distance_km,
+    team_objective,
+    TeamProposal,
+)
+
+
+
 # ---- defensive helper shim ----
 try:
     ensure_extra_tables
@@ -1227,8 +1240,7 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
             best_team = None
             best_obj = None
 
-            from app.scheduler import TeamProposal
-
+            
             for leader in leader_pool:
                 member_pool = [c for c in member_pool_all if c.auditor_id != leader.auditor_id]
                 need_n = max(0, int(t.required_headcount or 1) - 1)
