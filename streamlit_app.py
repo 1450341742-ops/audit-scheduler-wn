@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
+from types import SimpleNamespace
 
 import pandas as pd
 import streamlit as st
@@ -392,6 +393,63 @@ def _safe_int(x, default=None):
     except Exception:
         return default
 
+
+
+
+def parse_name_list(raw: str) -> list[str]:
+    s = str(raw or "").strip()
+    if not s:
+        return []
+    for sep in ["，", "、", ";", "；", "/", "|"]:
+        s = s.replace(sep, ",")
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def build_direct_entry_team(task: Task, candidates: list):
+    """
+    直录模式：
+    - 当硬指定人数 == 任务人数时，直接由硬指定成员组队
+    - 仍然校验这些人是否都在可用候选池内
+    """
+    specified_names = parse_name_list(getattr(task, "specified_auditors", None))
+    required_n = max(1, int(getattr(task, "required_headcount", 1) or 1))
+
+    if not specified_names or len(specified_names) != required_n:
+        return None, None
+
+    picked = [c for c in candidates if getattr(c, "auditor_name", "") in specified_names]
+    picked_names = {getattr(c, "auditor_name", "") for c in picked}
+    if set(specified_names) - picked_names:
+        missing = "、".join(sorted(set(specified_names) - picked_names))
+        return None, f"以下硬指定人员当前不可用或未入候选池：{missing}"
+
+    leader = None
+    if bool(getattr(task, "need_expert", False)):
+        for c in picked:
+            if bool(getattr(c, "can_lead_team", False)) and str(getattr(c, "group_level", "")) == "A":
+                leader = c
+                break
+        if leader is None:
+            return None, "硬指定成员中没有满足“A且可带队”的负责人，无法直录"
+    else:
+        for c in picked:
+            if bool(getattr(c, "can_lead_team", False)):
+                leader = c
+                break
+        if leader is None:
+            leader = picked[0]
+
+    members = [c for c in picked if int(getattr(c, "auditor_id")) != int(getattr(leader, "auditor_id"))]
+    avg_member_score = (sum(float(getattr(m, "score", 0.0)) for m in members) / len(members)) if members else 0.0
+    team_score = round(float(getattr(leader, "score", 0.0)) + avg_member_score, 1)
+
+    team = SimpleNamespace(
+        leader=leader,
+        members=members,
+        team_score=team_score,
+        notes="指定人员直录方案：硬指定人数等于任务人数，已直接按指定成员组成团队",
+    )
+    return team, None
 
 def normalize_text(v) -> str:
     if v is None:
@@ -1249,6 +1307,8 @@ if page == "智能排班":
                 else:
                     st.write("**组员：** 无")
                 st.caption(f"{team.notes}｜团队评分 {team.team_score}")
+                if "直录" in str(getattr(team, "notes", "")):
+                    st.success("当前为指定人员直录方案，团队成员已按硬指定名单直接生成")
                 default_member_ids = ",".join([str(m.auditor_id) for m in team.members])
                 member_ids_text = st.text_input("确认指派前，可手工调整组员ID（逗号分隔）", value=default_member_ids, key="member_ids_text")
                 if st.button("确认指派", type="primary", key="confirm_assign_btn"):
