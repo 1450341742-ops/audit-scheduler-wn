@@ -34,7 +34,7 @@ def _parse_names(raw):
     s = _norm(raw)
     if not s:
         return []
-    for sep in ["，", ";", "；", "/", "|"]:
+    for sep in ["，", "、", ";", "；", "/", "|"]:
         s = s.replace(sep, ",")
     return [x.strip() for x in s.split(",") if x.strip()]
 
