@@ -2595,28 +2595,35 @@ def aggregate_month_detail_rows_for_display(rows: list[dict]) -> list[dict]:
     grouped = {}
     for r in rows or []:
         key = (
-            r.get("来源", ""),
             int(r.get("任务ID") or 0),
             r.get("项目", "") or "",
             r.get("城市", "") or "",
             r.get("开始日期", "") or "",
             r.get("结束日期", "") or "",
         )
-        grouped.setdefault(key, {"roles": [], "people": [], "record_ids": []})
+        grouped.setdefault(key, {"sources": [], "roles": [], "people": [], "record_ids": []})
+        source_label = r.get("来源", "") or ""
         role = r.get("角色", "") or ""
         person = r.get("人员", "") or ""
         record_id = r.get("记录ID")
-        if role and role not in grouped[key]["roles"]:
-            grouped[key]["roles"].append(role)
-        if person and person not in grouped[key]["people"]:
-            grouped[key]["people"].append(person)
+
+        if source_label and source_label not in grouped[key]["sources"]:
+            grouped[key]["sources"].append(source_label)
+        if role:
+            for one_role in [x.strip() for x in str(role).split("、") if x.strip()]:
+                if one_role not in grouped[key]["roles"]:
+                    grouped[key]["roles"].append(one_role)
+        if person:
+            for one_person in [x.strip() for x in str(person).split("、") if x.strip()]:
+                if one_person not in grouped[key]["people"]:
+                    grouped[key]["people"].append(one_person)
         if record_id is not None:
             grouped[key]["record_ids"].append(record_id)
 
     out = []
-    for (source_label, task_id, project_name, city, start_s, end_s), payload in grouped.items():
+    for (task_id, project_name, city, start_s, end_s), payload in grouped.items():
         out.append({
-            "来源": source_label,
+            "来源": "、".join(payload["sources"]),
             "记录ID": "、".join(str(x) for x in payload["record_ids"]),
             "任务ID": task_id,
             "项目": project_name,
@@ -2626,7 +2633,7 @@ def aggregate_month_detail_rows_for_display(rows: list[dict]) -> list[dict]:
             "开始日期": start_s,
             "结束日期": end_s,
         })
-    out.sort(key=lambda x: (x["开始日期"], x["任务ID"], x["来源"]))
+    out.sort(key=lambda x: (x["开始日期"], x["任务ID"], x["项目"]))
     return out
 
 
