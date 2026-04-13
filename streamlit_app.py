@@ -1745,7 +1745,7 @@ def render_day_detail_panel(calendar_event_map: dict):
 
 
 # -------------------- 日历视图 --------------------
-elif page == "日历视图":
+if page == "日历视图":
     st.subheader("日历视图")
     st.caption("按月查看排班、节假日标识，并支持导出 ICS 日历。")
 
