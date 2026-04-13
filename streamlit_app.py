@@ -301,6 +301,7 @@ def seed_cities_if_needed(db: Session):
     safe_commit(db, "初始化城市坐标")
 
 
+
 # -------------------- 权限 --------------------
 ALL_PAGES = [
     "智能排班",
@@ -586,7 +587,6 @@ def check_login(username: str, password: str) -> bool:
     return str(user.get("password_hash")) == hash_password(str(password))
 
 
-bootstrap_auth_users_if_needed()
 
 
 def render_login():
@@ -633,15 +633,15 @@ def ics_escape(s: str) -> str:
 
 
 def build_ics_events(db: Session, auditor_id: int | None = None):
-    q = db.query(Schedule).order_by(Schedule.id.desc())
+    q = db.query(Schedule).options(joinedload(Schedule.task), joinedload(Schedule.auditor)).order_by(Schedule.id.desc())
     if auditor_id:
         q = q.filter(Schedule.auditor_id == auditor_id)
     sch = q.all()
     events = []
     now = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     for s in sch:
-        a = db.query(Auditor).filter(Auditor.id == s.auditor_id).first()
-        t = db.query(Task).filter(Task.id == s.task_id).first()
+        a = s.auditor
+        t = s.task
         if not a or not t:
             continue
         start = datetime.combine(t.start_date, datetime.min.time()).replace(hour=9)
@@ -1050,6 +1050,10 @@ def ensure_support_tables():
 def ensure_extra_tables():
     ensure_support_tables()
 
+# 启动初始化：放到依赖函数全部定义完成之后再执行，避免 NameError
+initialize_app_once()
+bootstrap_auth_users_if_needed()
+
 
 def parse_name_list(raw):
     s = normalize_text(raw)
@@ -1295,7 +1299,7 @@ def get_progress_stats(period_type: str, year: int, period_value: int):
     today_d = date.today()
     with db_session() as db:
         tasks = db.query(Task).order_by(Task.start_date.asc()).all()
-        schedules = db.query(Schedule).options(joinedload(Schedule.auditor)).all()
+        schedules = db.query(Schedule).options(joinedload(Schedule.auditor), joinedload(Schedule.task)).all()
 
     in_period_tasks = []
     for t in tasks:
