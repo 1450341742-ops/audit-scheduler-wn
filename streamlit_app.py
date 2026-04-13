@@ -678,6 +678,25 @@ def get_progress_stats(period_type: str, year: int, period_value: int):
         "staffing_completion_rate": staffing_completion_rate,
     }
 
+
+# 侧边导航兜底：避免 page 未定义导致页面分支报错
+try:
+    page
+except NameError:
+    allowed_pages = st.session_state.get("allowed_pages", ALL_PAGES[:] if st.session_state.get("is_admin") else DEFAULT_NORMAL_PAGES[:])
+    if not allowed_pages:
+        allowed_pages = DEFAULT_NORMAL_PAGES[:]
+    st.sidebar.title(APP_NAME)
+    st.sidebar.caption(f"当前位置：{allowed_pages[0]}")
+    if st.sidebar.button("退出登录"):
+        st.session_state["logged_in"] = False
+        st.session_state["login_user"] = ""
+        st.session_state["is_admin"] = False
+        st.session_state["is_super_admin"] = False
+        st.session_state["allowed_pages"] = DEFAULT_NORMAL_PAGES[:]
+        st.rerun()
+    page = st.sidebar.radio("导航", allowed_pages, index=0)
+
 # -------------------- 智能排班 --------------------
 if page == "智能排班":
     st.subheader("智能排班")
