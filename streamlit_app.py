@@ -1342,28 +1342,22 @@ def get_progress_stats(period_type: str, year: int, period_value: int):
         if date_ranges_overlap(t_start, t_end, start_d, end_d):
             in_period_tasks.append(t)
 
-    actual_projects = len({int(t.id) for t in in_period_tasks})
+    recorded_projects = len({int(t.id) for t in in_period_tasks})
     completed_projects = len({
         int(t.id) for t in in_period_tasks
-        if ((getattr(t, "end_date", None) or getattr(t, "start_date", None)) and (getattr(t, "end_date", None) or getattr(t, "start_date", None)) < today_d)
+        if ((getattr(t, "end_date", None) or getattr(t, "start_date", None))
+            and (getattr(t, "end_date", None) or getattr(t, "start_date", None)) < today_d)
     })
 
-    staffing_rows = []
-    actual_staffing = 0
+    staffing_scheduled = 0
+    staffing_completed = 0
     for s in schedules:
         s_start = getattr(s, "start_date", None)
         s_end = getattr(s, "end_date", None) or s_start
         if date_ranges_overlap(s_start, s_end, start_d, end_d):
-            actual_staffing += 1
-            staffing_rows.append({
-                "项目名称": s.task.project_name if getattr(s, "task", None) else "",
-                "客户名称": s.task.customer_name if getattr(s, "task", None) else "",
-                "城市": s.task.site_city if getattr(s, "task", None) else "",
-                "开始日期": d2s(s_start),
-                "结束日期": d2s(s_end),
-                "稽查员": s.auditor.name if getattr(s, "auditor", None) else "",
-                "角色": "组长" if s.role == "leader" else "成员",
-            })
+            staffing_scheduled += 1
+            if s_end and s_end < today_d:
+                staffing_completed += 1
 
     detail_rows = []
     for t in in_period_tasks:
@@ -1377,20 +1371,22 @@ def get_progress_stats(period_type: str, year: int, period_value: int):
             "硬指定": t.specified_auditors or "",
         })
 
-    return start_d, end_d, completed_projects, actual_staffing, detail_rows
+    return start_d, end_d, recorded_projects, completed_projects, staffing_scheduled, staffing_completed, detail_rows
 
 
 def get_yearly_month_progress(year: int):
     rows = []
     for m in range(1, 13):
-        start_d, end_d, actual_projects, actual_staffing, detail_rows = get_progress_stats("monthly", year, m)
+        start_d, end_d, recorded_projects, completed_projects, staffing_scheduled, staffing_completed, detail_rows = get_progress_stats("monthly", year, m)
         target = get_target_row("monthly", year, m)
         rows.append({
             "月份": f"{m}月",
             "计划项目完成": int(target.get("target_projects", 0) or 0),
-            "实际项目完成": int(actual_projects),
+            "实际项目完成": int(completed_projects),
+            "已排项目数": int(recorded_projects),
             "计划人员院次": int(target.get("target_staffing", 0) or 0),
-            "实际人员院次": int(actual_staffing),
+            "实际人员院次": int(staffing_completed),
+            "已排人员院次": int(staffing_scheduled),
         })
     return pd.DataFrame(rows)
 
@@ -1441,11 +1437,19 @@ def render_day_detail_panel(calendar_event_map: dict):
         st.info("本月暂无安排")
         return
     selected_day = st.selectbox("选择日期", options=day_options, format_func=lambda d: d.strftime("%Y-%m-%d"), key="calendar_day_detail")
-    items = calendar_event_map.get(selected_day, [])
+    render_calendar_day_popover(selected_day, calendar_event_map.get(selected_day, []), use_explicit_header=True)
+
+
+def render_calendar_day_popover(day_obj: date, items: list[dict], use_explicit_header: bool = False):
+    if use_explicit_header:
+        st.markdown(f"**{day_obj.strftime('%Y-%m-%d')}**")
+    if not items:
+        st.info("当天暂无安排")
+        return
     rows = []
     for item in items:
         rows.append({
-            "日期": selected_day.strftime("%Y-%m-%d"),
+            "日期": day_obj.strftime("%Y-%m-%d"),
             "项目": item.get("project_name") or "",
             "城市": item.get("site_city") or "",
             "人员": item.get("auditor_name") or "",
@@ -1454,7 +1458,7 @@ def render_day_detail_panel(calendar_event_map: dict):
             "结束": d2s(item.get("end_date")),
             "来源": "已定直录" if item.get("source") == "direct" else "标准排班",
         })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=min(360, 90 + len(rows) * 35))
 
 
 def load_day_marks():
@@ -1496,7 +1500,9 @@ page = st.sidebar.radio(
     label_visibility="collapsed",
 )
 
-st.title(f"{APP_NAME}｜{page}")
+st.sidebar.caption(f"当前位置：{page}")
+st.title(APP_NAME)
+st.caption(f"当前页面：{page}")
 
 if (not is_admin) and (page not in allowed_pages):
     st.error("当前账号无权限访问该板块，请联系主管理员开通。")
@@ -2084,7 +2090,7 @@ elif page == "任务管理":
 # -------------------- 页面：指标统计 --------------------
 elif page == "指标统计":
     st.subheader("指标统计")
-    st.caption("支持录入院次指标数量，并自动统计已录入项目、已完成项目、年度月度趋势，以及每位稽查员月/季/年的计划与实际完成情况。")
+    st.caption("支持录入院次指标数量，并自动统计目标、已排、实际，以及年度月度趋势和每位稽查员月/季/年的计划与实际完成情况。")
 
     c1, c2, c3 = st.columns(3)
     period_type = c1.selectbox("统计周期", ["monthly", "quarterly", "yearly"], format_func=lambda x: {"monthly":"月度","quarterly":"季度","yearly":"年度"}[x])
@@ -2107,18 +2113,18 @@ elif page == "指标统计":
             st.success("指标已保存")
             st.rerun()
 
-    start_d, end_d, actual_projects, actual_staffing, detail_rows = get_progress_stats(period_type, int(year), int(period_value))
+    start_d, end_d, scheduled_projects, actual_projects, scheduled_staffing, actual_staffing, detail_rows = get_progress_stats(period_type, int(year), int(period_value))
     target = get_target_row(period_type, int(year), int(period_value))
     t_projects = int(target.get("target_projects", 0) or 0)
     t_staff = int(target.get("target_staffing", 0) or 0)
 
     summary_df = pd.DataFrame([
-        {"指标": "已完成院次数", "目标": t_projects, "实际": actual_projects, "完成率": f"{round(actual_projects / t_projects * 100, 1) if t_projects else 0.0}%"},
-        {"指标": "人员院次安排数", "目标": t_staff, "实际": actual_staffing, "完成率": f"{round(actual_staffing / t_staff * 100, 1) if t_staff else 0.0}%"},
+        {"指标": "项目院次数", "目标": t_projects, "已排": scheduled_projects, "实际": actual_projects, "完成率": f"{round(actual_projects / t_projects * 100, 1) if t_projects else 0.0}%"},
+        {"指标": "人员院次安排数", "目标": t_staff, "已排": scheduled_staffing, "实际": actual_staffing, "完成率": f"{round(actual_staffing / t_staff * 100, 1) if t_staff else 0.0}%"},
     ])
     st.write(f"统计区间：{d2s(start_d)} ~ {d2s(end_d)}")
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
-    st.bar_chart(summary_df.set_index("指标")[["目标", "实际"]])
+    st.bar_chart(summary_df.set_index("指标")[["目标", "已排", "实际"]])
 
     st.subheader("项目完成进度及人员安排进度明细")
     if detail_rows:
@@ -2131,8 +2137,8 @@ elif page == "指标统计":
         st.subheader("年度视图：每月计划与实际完成")
         ym_df = get_yearly_month_progress(int(year))
         st.dataframe(ym_df, use_container_width=True, hide_index=True)
-        st.bar_chart(ym_df.set_index("月份")[["计划项目完成", "实际项目完成"]])
-        st.line_chart(ym_df.set_index("月份")[["计划项目完成", "实际项目完成"]])
+        st.bar_chart(ym_df.set_index("月份")[["计划项目完成", "实际项目完成", "已排项目数"]])
+        st.line_chart(ym_df.set_index("月份")[["计划项目完成", "实际项目完成", "已排项目数"]])
 
     st.divider()
     st.subheader("稽查员月/季/年完成情况")
@@ -2691,15 +2697,18 @@ elif page == "日历视图":
             elif evs:
                 color = "#eef6ff"
 
-            cols[idx].markdown(
-                f"<div style='border:1px solid #ddd;border-radius:8px;padding:8px;min-height:120px;background:{color};'>"
-                f"<div style='font-weight:600'>{day.day}</div>"
-                + (f"<div style='color:#d97706;font-size:12px'>{' / '.join(marks)}</div>" if marks else "")
-                + ("" if not evs else "".join([f"<div style='font-size:12px;margin-top:4px'>{e}</div>" for e in evs[:3]]))
-                + (f"<div style='font-size:12px;color:#666'>还有 {len(evs)-3} 项</div>" if len(evs) > 3 else "")
-                + "</div>",
-                unsafe_allow_html=True,
-            )
+            with cols[idx]:
+                with st.container(border=True):
+                    trigger_label = f"{day.day}"
+                    if marks:
+                        trigger_label += " " + " / ".join(marks)
+                    with st.popover(trigger_label, use_container_width=True):
+                        render_calendar_day_popover(day, calendar_detail_map.get(day, []))
+                    if evs:
+                        for e in evs[:3]:
+                            st.caption(e)
+                        if len(evs) > 3:
+                            st.caption(f"还有 {len(evs)-3} 项，点击日期查看全部")
 
     render_day_detail_panel(calendar_detail_map)
 
