@@ -298,6 +298,13 @@ def ensure_support_tables():
                 created_at TEXT
             )
         '''))
+        conn.execute(text('''
+            CREATE TABLE IF NOT EXISTS auditor_monthly_targets (
+                auditor_id INTEGER PRIMARY KEY,
+                monthly_target INTEGER NOT NULL DEFAULT 4,
+                updated_at TEXT
+            )
+        '''))
         try:
             conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_progress_targets_period ON progress_targets(period_type, year, period_value)"))
         except Exception:
@@ -521,14 +528,102 @@ def save_target_row(period_type: str, year: int, period_value: int, target_proje
     return True
 
 
+def get_period_completed_counts(period_type: str, year: int, period_value: int):
+    start_d, end_d = _get_period_range(period_type, int(year), int(period_value or 0))
+    today = date.today()
+    with db_session() as db:
+        tasks = db.query(Task).filter(Task.start_date >= start_d, Task.start_date <= end_d).order_by(Task.start_date.asc(), Task.id.asc()).all()
+    recorded_tasks = list(tasks)
+    completed_tasks = [t for t in recorded_tasks if (t.end_date or t.start_date) < today]
+    return start_d, end_d, recorded_tasks, completed_tasks
+
+
+def get_monthly_target_value(year: int, month: int) -> int:
+    row = get_target_row('monthly', int(year), int(month))
+    return int(row.get('target_projects', 0) or 0)
+
+
+def get_annual_monthly_progress(year: int) -> pd.DataFrame:
+    rows = []
+    for m in range(1, 13):
+        start_d, end_d = _get_period_range('monthly', int(year), int(m))
+        today = date.today()
+        with db_session() as db:
+            tasks = db.query(Task).filter(Task.start_date >= start_d, Task.start_date <= end_d).all()
+        actual = sum(1 for t in tasks if (t.end_date or t.start_date) < today)
+        plan = get_monthly_target_value(int(year), int(m))
+        rows.append({'月份': f'{m}月', '实际完成': int(actual), '计划完成': int(plan)})
+    return pd.DataFrame(rows)
+
+
+def get_auditor_monthly_target_map() -> dict[int, int]:
+    ensure_support_tables()
+    with engine.begin() as conn:
+        rows = conn.execute(text('SELECT auditor_id, monthly_target FROM auditor_monthly_targets')).mappings().all()
+    return {int(r['auditor_id']): int(r.get('monthly_target') or 4) for r in rows}
+
+
+def save_auditor_monthly_target(auditor_id: int, monthly_target: int):
+    ensure_support_tables()
+    params = {
+        'auditor_id': int(auditor_id),
+        'monthly_target': int(monthly_target or 0),
+        'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    }
+    with engine.begin() as conn:
+        row = conn.execute(text('SELECT auditor_id FROM auditor_monthly_targets WHERE auditor_id=:auditor_id'), params).mappings().first()
+        if row:
+            conn.execute(text('UPDATE auditor_monthly_targets SET monthly_target=:monthly_target, updated_at=:updated_at WHERE auditor_id=:auditor_id'), params)
+        else:
+            conn.execute(text('INSERT INTO auditor_monthly_targets (auditor_id, monthly_target, updated_at) VALUES (:auditor_id, :monthly_target, :updated_at)'), params)
+    return True
+
+
+def get_auditor_period_stats(period_type: str, year: int, period_value: int) -> pd.DataFrame:
+    start_d, end_d = _get_period_range(period_type, int(year), int(period_value or 0))
+    today = date.today()
+    months_multiplier = {'monthly': 1, 'quarterly': 3, 'yearly': 12}.get(period_type, 1)
+    target_map = get_auditor_monthly_target_map()
+    with db_session() as db:
+        auditors = db.query(Auditor).order_by(Auditor.id.asc()).all()
+        schedules = db.query(Schedule).join(Task, Task.id == Schedule.task_id).filter(Task.start_date >= start_d, Task.start_date <= end_d).all()
+        task_map = {int(t.id): t for t in db.query(Task).filter(Task.start_date >= start_d, Task.start_date <= end_d).all()}
+    completed_pairs = set()
+    for s in schedules:
+        task = task_map.get(int(s.task_id))
+        if not task:
+            continue
+        task_end = task.end_date or task.start_date
+        if task_end < today:
+            completed_pairs.add((int(s.auditor_id), int(s.task_id)))
+    completed_by_auditor = {}
+    for aid, tid in completed_pairs:
+        completed_by_auditor[aid] = completed_by_auditor.get(aid, 0) + 1
+    rows = []
+    for a in auditors:
+        monthly_target = int(target_map.get(int(a.id), 4) or 4)
+        plan = monthly_target * months_multiplier
+        actual = int(completed_by_auditor.get(int(a.id), 0))
+        rows.append({
+            '稽查员': a.name,
+            '月度计划': monthly_target,
+            '本周期计划': int(plan),
+            '本周期实际完成': int(actual),
+            '完成率': round(actual / plan * 100, 1) if plan else 0.0,
+        })
+    return pd.DataFrame(rows)
+
+
 def get_progress_stats(period_type: str, year: int, period_value: int):
     start_d, end_d = _get_period_range(period_type, int(year), int(period_value or 0))
+    today = date.today()
     with db_session() as db:
         tasks = db.query(Task).filter(Task.start_date >= start_d, Task.start_date <= end_d).order_by(Task.start_date.asc(), Task.id.asc()).all()
         schedules = db.query(Schedule).filter(Schedule.start_date >= start_d, Schedule.start_date <= end_d).all()
         auditor_map = {int(a.id): a for a in db.query(Auditor).all()}
-    actual_projects = len(tasks)
-    actual_staffing = len(schedules)
+    recorded_projects = len(tasks)
+    completed_projects = sum(1 for t in tasks if (t.end_date or t.start_date) < today)
+    actual_staffing = len({(int(getattr(s, 'task_id')), int(getattr(s, 'auditor_id'))) for s in schedules})
     detail_rows = []
     for t in tasks:
         task_schedules = [s for s in schedules if int(getattr(s, 'task_id')) == int(t.id)]
@@ -544,12 +639,13 @@ def get_progress_stats(period_type: str, year: int, period_value: int):
             '城市': t.site_city or '',
             '开始日期': d2s(t.start_date),
             '结束日期': d2s(t.end_date),
+            '是否已完成': '是' if ((t.end_date or t.start_date) < today) else '否',
             '院次/天数': int(getattr(t, 'required_days', 1) or 1),
             '计划人数': int(getattr(t, 'required_headcount', 1) or 1),
             '实际安排人数': len({int(getattr(s, 'auditor_id')) for s in task_schedules}),
             '安排人员': '、'.join(people),
         })
-    return start_d, end_d, actual_projects, actual_staffing, detail_rows
+    return start_d, end_d, recorded_projects, completed_projects, actual_staffing, detail_rows
 
 
 def seed_city_distances_if_needed(db: Session):
@@ -2014,7 +2110,7 @@ elif page == "任务管理":
 # -------------------- 页面：指标统计 --------------------
 elif page == "指标统计":
     st.subheader("指标统计")
-    st.caption("支持录入月度、季度、年度项目/人员安排指标，并结合系统数据自动计算完成进度。")
+    st.caption("支持录入院次指标数量，并自动统计已录入项目、已完成项目、年度月度趋势，以及每位稽查员月/季/年的计划与实际完成情况。")
 
     c1, c2, c3 = st.columns(3)
     period_type = c1.selectbox("统计周期", ["monthly", "quarterly", "yearly"], format_func=lambda x: {"monthly":"月度","quarterly":"季度","yearly":"年度"}[x])
@@ -2030,25 +2126,69 @@ elif page == "指标统计":
     target = get_target_row(period_type, int(year), int(period_value))
     with st.form("target_form", clear_on_submit=False):
         c1, c2 = st.columns(2)
-        target_projects = c1.number_input("项目指标数量", min_value=0, value=int(target.get("target_projects", 0) or 0), step=1)
+        target_projects = c1.number_input("院次指标数量", min_value=0, value=int(target.get("target_projects", 0) or 0), step=1)
         target_staffing = c2.number_input("人员安排指标数量", min_value=0, value=int(target.get("target_staffing", 0) or 0), step=1)
         if st.form_submit_button("保存指标", type="primary"):
             save_target_row(period_type, int(year), int(period_value), int(target_projects), int(target_staffing))
             st.success("指标已保存")
             st.rerun()
 
-    start_d, end_d, actual_projects, actual_staffing, detail_rows = get_progress_stats(period_type, int(year), int(period_value))
+    start_d, end_d, recorded_projects, completed_projects, actual_staffing, detail_rows = get_progress_stats(period_type, int(year), int(period_value))
     target = get_target_row(period_type, int(year), int(period_value))
     t_projects = int(target.get("target_projects", 0) or 0)
     t_staff = int(target.get("target_staffing", 0) or 0)
+    complete_rate = round(completed_projects / t_projects * 100, 1) if t_projects else 0.0
+    staffing_rate = round(actual_staffing / t_staff * 100, 1) if t_staff else 0.0
+
+    st.write(f"统计区间：{d2s(start_d)} ~ {d2s(end_d)}")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("院次目标数", t_projects)
+    m2.metric("已录入院次数", recorded_projects)
+    m3.metric("已完成院次数", completed_projects)
+    m4.metric("院次完成率", f"{complete_rate}%")
 
     summary_df = pd.DataFrame([
-        {"指标": "项目完成数", "目标": t_projects, "实际": actual_projects, "完成率": f"{round(actual_projects / t_projects * 100, 1) if t_projects else 0.0}%"},
-        {"指标": "人员安排数", "目标": t_staff, "实际": actual_staffing, "完成率": f"{round(actual_staffing / t_staff * 100, 1) if t_staff else 0.0}%"},
+        {"指标": "院次目标数", "目标": t_projects, "实际": completed_projects, "完成率": f"{complete_rate}%"},
+        {"指标": "人员安排数", "目标": t_staff, "实际": actual_staffing, "完成率": f"{staffing_rate}%"},
+        {"指标": "已录入院次数", "目标": recorded_projects, "实际": recorded_projects, "完成率": "100.0%"},
     ])
-    st.write(f"统计区间：{d2s(start_d)} ~ {d2s(end_d)}")
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
     st.bar_chart(summary_df.set_index("指标")[["目标", "实际"]])
+
+    if period_type == "yearly":
+        st.subheader("年度视图：每月计划完成 vs 实际完成")
+        annual_df = get_annual_monthly_progress(int(year))
+        st.dataframe(annual_df, use_container_width=True, hide_index=True)
+        st.bar_chart(annual_df.set_index("月份")[["计划完成", "实际完成"]])
+        st.line_chart(annual_df.set_index("月份")[["计划完成", "实际完成"]])
+
+    st.subheader("稽查员计划与实际完成对比")
+    with db_session() as db:
+        auditors = db.query(Auditor).order_by(Auditor.id.asc()).all()
+    target_map = get_auditor_monthly_target_map()
+    if auditors:
+        plan_rows = []
+        for a in auditors:
+            plan_rows.append({
+                '稽查员ID': int(a.id),
+                '稽查员': a.name,
+                '每月计划院次数': int(target_map.get(int(a.id), 4) or 4),
+            })
+        edit_df = st.data_editor(pd.DataFrame(plan_rows), use_container_width=True, hide_index=True, num_rows='fixed', key='auditor_plan_editor')
+        if st.button('保存每人月度计划院次数'):
+            for _, r in pd.DataFrame(edit_df).iterrows():
+                save_auditor_monthly_target(int(r['稽查员ID']), int(r['每月计划院次数']))
+            st.success('已保存每位稽查员月度计划院次数')
+            st.rerun()
+
+    auditor_stats_df = get_auditor_period_stats(period_type, int(year), int(period_value))
+    if not auditor_stats_df.empty:
+        st.dataframe(auditor_stats_df, use_container_width=True, hide_index=True)
+        chart_df = auditor_stats_df.set_index('稽查员')[["本周期计划", "本周期实际完成"]]
+        st.bar_chart(chart_df)
+        st.line_chart(chart_df)
+    else:
+        st.info("暂无稽查员统计数据")
 
     st.subheader("项目完成进度及人员安排进度明细")
     if detail_rows:
