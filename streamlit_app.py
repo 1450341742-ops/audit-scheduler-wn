@@ -2799,6 +2799,18 @@ if page == "日历视图":
     month = c3.selectbox("月份", list(range(1, 13)), index=date.today().month - 1, key="cal_month")
     auditor_id = auditor_options[auditor_label]
 
+    with db_session() as db:
+        ics_bytes = build_ics_events(db, auditor_id=auditor_id)
+    st.download_button(
+        "导出 ICS 日历",
+        data=ics_bytes,
+        file_name=f"万宁睿和排班_{int(year)}_{int(month):02d}.ics",
+        mime="text/calendar",
+        key="download_calendar_ics",
+        use_container_width=False,
+    )
+
+
     month_start = date(int(year), int(month), 1)
     next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
     month_end = next_month - timedelta(days=1)
