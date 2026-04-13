@@ -806,12 +806,18 @@ def update_task_record(
 
 
 def delete_task_record(task_id: int):
+    ensure_support_tables()
     with db_session() as db:
         obj = db.query(Task).filter(Task.id == int(task_id)).first()
         if not obj:
             st.error("未找到对应任务记录")
             return False
         db.query(Schedule).filter(Schedule.task_id == int(task_id)).delete()
+        try:
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM direct_assignments WHERE task_id = :task_id"), {"task_id": int(task_id)})
+        except Exception:
+            pass
         db.delete(obj)
         return safe_commit(db, f"删除任务#{task_id}")
 
@@ -1446,19 +1452,31 @@ def render_calendar_day_popover(day_obj: date, items: list[dict], use_explicit_h
     if not items:
         st.info("当天暂无安排")
         return
+
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stPopoverBody"]{
+            min-width: 420px !important;
+            max-width: 520px !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     rows = []
     for item in items:
         rows.append({
-            "日期": day_obj.strftime("%Y-%m-%d"),
             "项目": item.get("project_name") or "",
             "城市": item.get("site_city") or "",
-            "人员": item.get("auditor_name") or "",
+            "人员": item.get("auditor_name") or item.get("person_name") or "",
             "角色": "组长" if item.get("role") == "leader" else "成员",
             "开始": d2s(item.get("start_date")),
             "结束": d2s(item.get("end_date")),
             "来源": "已定直录" if item.get("source") == "direct" else "标准排班",
         })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=min(360, 90 + len(rows) * 35))
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=min(260, 80 + len(rows) * 34))
 
 
 def load_day_marks():
@@ -2550,6 +2568,136 @@ elif page == "模板导入":
             clear_runtime_caches_after_data_change()
             st.success(f"已导入 / 更新 {imported} 条任务记录。")
             st.rerun()
+
+
+def load_month_schedule_detail_rows(year: int, month: int):
+    month_start = date(int(year), int(month), 1)
+    next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    month_end = next_month - timedelta(days=1)
+
+    rows = []
+    with db_session() as db:
+        schedules = (
+            db.query(Schedule)
+            .options(joinedload(Schedule.task), joinedload(Schedule.auditor))
+            .filter(Schedule.start_date <= month_end, Schedule.end_date >= month_start)
+            .order_by(Schedule.start_date.asc(), Schedule.id.asc())
+            .all()
+        )
+        for s in schedules:
+            rows.append({
+                "来源": "标准排班",
+                "记录ID": int(s.id),
+                "任务ID": int(s.task_id),
+                "项目": s.task.project_name if s.task else "",
+                "城市": s.task.site_city if s.task else "",
+                "角色": "组长" if s.role == "leader" else "成员",
+                "人员": s.auditor.name if s.auditor else "",
+                "开始日期": d2s(s.start_date),
+                "结束日期": d2s(s.end_date),
+                "_source_type": "schedule",
+            })
+
+    try:
+        with engine.begin() as conn:
+            drows = conn.execute(text("""
+                SELECT id, task_id, auditor_id, person_name, role, start_date, end_date
+                FROM direct_assignments
+                WHERE start_date <= :month_end AND end_date >= :month_start
+                ORDER BY start_date ASC, id ASC
+            """), {"month_start": d2s(month_start), "month_end": d2s(month_end)}).mappings().all()
+        with db_session() as db:
+            task_map = {int(t.id): t for t in db.query(Task).all()}
+        for r in drows:
+            task_obj = task_map.get(int(r["task_id"])) if r.get("task_id") is not None else None
+            rows.append({
+                "来源": "已定直录",
+                "记录ID": int(r["id"]),
+                "任务ID": int(r["task_id"]),
+                "项目": task_obj.project_name if task_obj else "",
+                "城市": task_obj.site_city if task_obj else "",
+                "角色": "组长" if r.get("role") == "leader" else "成员",
+                "人员": r.get("person_name") or "",
+                "开始日期": str(r.get("start_date") or ""),
+                "结束日期": str(r.get("end_date") or ""),
+                "_source_type": "direct",
+            })
+    except Exception:
+        pass
+
+    rows.sort(key=lambda x: (x["开始日期"], x["任务ID"], x["来源"], x["记录ID"]))
+    return rows
+
+
+def delete_schedule_detail_row(source_type: str, record_id: int, task_id: int):
+    if source_type == "schedule":
+        with db_session() as db:
+            db.query(Schedule).filter(Schedule.id == int(record_id)).delete()
+            return safe_commit(db, f"删除排班记录#{record_id}")
+    if source_type == "direct":
+        ensure_support_tables()
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM direct_assignments WHERE id = :id"), {"id": int(record_id)})
+        with db_session() as db:
+            task = db.query(Task).filter(Task.id == int(task_id)).first()
+            if task:
+                db.query(Schedule).filter(Schedule.task_id == int(task_id)).delete()
+                safe_commit(db, f"同步清理任务#{task_id}标准排班")
+                sync_task_schedules_from_direct_assignments(task)
+        return True
+    return False
+
+
+def update_schedule_detail_row(source_type: str, record_id: int, task_id: int, role_label: str, person_name: str, start_date_value, end_date_value):
+    start_d = safe_parse_date(start_date_value)
+    end_d = safe_parse_date(end_date_value)
+    if not start_d or not end_d:
+        return False, "开始/结束日期无效"
+    if end_d < start_d:
+        return False, "结束日期不能早于开始日期"
+
+    role_value = "leader" if str(role_label) == "组长" else "member"
+
+    if source_type == "schedule":
+        with db_session() as db:
+            row = db.query(Schedule).options(joinedload(Schedule.auditor)).filter(Schedule.id == int(record_id)).first()
+            if not row:
+                return False, "未找到排班记录"
+            auditor = row.auditor
+            if person_name and auditor and auditor.name != person_name:
+                new_auditor = db.query(Auditor).filter(Auditor.name == person_name).first()
+                if new_auditor:
+                    row.auditor_id = int(new_auditor.id)
+            row.role = role_value
+            row.start_date = start_d
+            row.end_date = end_d
+            ok = safe_commit(db, f"更新排班记录#{record_id}")
+            return (ok, "已更新") if ok else (False, "更新失败")
+
+    if source_type == "direct":
+        ensure_support_tables()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with engine.begin() as conn:
+            conn.execute(text("""
+                UPDATE direct_assignments
+                SET person_name=:person_name, role=:role, start_date=:start_date, end_date=:end_date, updated_at=:updated_at
+                WHERE id=:id
+            """), {
+                "person_name": person_name,
+                "role": role_value,
+                "start_date": d2s(start_d),
+                "end_date": d2s(end_d),
+                "updated_at": now,
+                "id": int(record_id),
+            })
+        with db_session() as db:
+            task = db.query(Task).filter(Task.id == int(task_id)).first()
+            if task:
+                db.query(Schedule).filter(Schedule.task_id == int(task_id)).delete()
+                safe_commit(db, f"清理任务#{task_id}旧排班")
+                sync_task_schedules_from_direct_assignments(task)
+        return True, "已更新"
+    return False, "未知来源"
 
 # -------------------- 日历视图 --------------------
 elif page == "日历视图":
