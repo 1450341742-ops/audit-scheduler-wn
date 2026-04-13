@@ -479,10 +479,18 @@ def auto_fill_direct_assignments_from_specified(task_id: int, overwrite: bool = 
 
     existing = get_direct_assignments(int(task_id))
     if existing and not overwrite:
-        return True, "已存在已定项目人员，未覆盖"
+        with db_session() as db:
+            task = db.query(Task).filter(Task.id == int(task_id)).first()
+            if task:
+                sync_task_schedules_from_direct_assignments(task)
+        return True, "已存在已定项目人员，并已同步到排班记录"
 
     replace_direct_assignments(int(task_id), rows_to_save)
-    return True, "已根据硬指定人员自动生成直录排班"
+    with db_session() as db:
+        task = db.query(Task).filter(Task.id == int(task_id)).first()
+        if task:
+            sync_task_schedules_from_direct_assignments(task)
+    return True, "已根据硬指定人员自动生成直录排班，并同步到排班记录"
 
 
 def _get_period_range(period_type: str, year: int, period_value: int):
@@ -1298,6 +1306,7 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
     for t in tasks:
         direct_rows_existing = get_direct_assignments(int(t.id))
         if direct_rows_existing:
+            sync_task_schedules_from_direct_assignments(t)
             report["assigned"].append(
                 {
                     "task_id": t.id,
@@ -1311,6 +1320,7 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
         specified_names = parse_name_list(getattr(t, "specified_auditors", None))
         if specified_names:
             auto_fill_direct_assignments_from_specified(int(t.id), overwrite=True)
+            sync_task_schedules_from_direct_assignments(t)
             report["assigned"].append(
                 {
                     "task_id": t.id,
