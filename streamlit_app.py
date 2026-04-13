@@ -2821,6 +2821,32 @@ def update_schedule_detail_row(source_type: str, record_id: int, task_id: int, r
         return True, "已更新"
     return False, "未知来源"
 
+
+def cleanup_orphan_calendar_rows():
+    """清理任务已删除后遗留在 direct_assignments / schedules 的脏数据。"""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                DELETE FROM direct_assignments
+                WHERE task_id NOT IN (SELECT id FROM tasks)
+            """))
+    except Exception:
+        pass
+
+    try:
+        with db_session() as db:
+            rows = db.query(Schedule).options(joinedload(Schedule.task)).all()
+            removed = False
+            for s in rows:
+                if not s.task:
+                    db.delete(s)
+                    removed = True
+            if removed:
+                safe_commit(db, "清理已删除任务遗留排班")
+    except Exception:
+        pass
+
+
 # -------------------- 日历视图 --------------------
 if page == "日历视图":
     cleanup_orphan_calendar_rows()
