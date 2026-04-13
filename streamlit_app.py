@@ -2590,6 +2590,46 @@ elif page == "模板导入":
             st.rerun()
 
 
+
+def aggregate_month_detail_rows_for_display(rows: list[dict]) -> list[dict]:
+    grouped = {}
+    for r in rows or []:
+        key = (
+            r.get("来源", ""),
+            int(r.get("任务ID") or 0),
+            r.get("项目", "") or "",
+            r.get("城市", "") or "",
+            r.get("开始日期", "") or "",
+            r.get("结束日期", "") or "",
+        )
+        grouped.setdefault(key, {"roles": [], "people": [], "record_ids": []})
+        role = r.get("角色", "") or ""
+        person = r.get("人员", "") or ""
+        record_id = r.get("记录ID")
+        if role and role not in grouped[key]["roles"]:
+            grouped[key]["roles"].append(role)
+        if person and person not in grouped[key]["people"]:
+            grouped[key]["people"].append(person)
+        if record_id is not None:
+            grouped[key]["record_ids"].append(record_id)
+
+    out = []
+    for (source_label, task_id, project_name, city, start_s, end_s), payload in grouped.items():
+        out.append({
+            "来源": source_label,
+            "记录ID": "、".join(str(x) for x in payload["record_ids"]),
+            "任务ID": task_id,
+            "项目": project_name,
+            "城市": city,
+            "角色": "、".join(payload["roles"]),
+            "人员": "、".join(payload["people"]),
+            "开始日期": start_s,
+            "结束日期": end_s,
+        })
+    out.sort(key=lambda x: (x["开始日期"], x["任务ID"], x["来源"]))
+    return out
+
+
 def load_month_schedule_detail_rows(year: int, month: int):
     month_start = date(int(year), int(month), 1)
     next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
@@ -2899,8 +2939,9 @@ if page == "日历视图":
     st.subheader("本月排班明细")
     month_detail_rows = load_month_schedule_detail_rows(int(year), int(month))
     if month_detail_rows:
+        month_detail_display_rows = aggregate_month_detail_rows_for_display(month_detail_rows)
         st.dataframe(
-            pd.DataFrame([{k: v for k, v in r.items() if not str(k).startswith("_")} for r in month_detail_rows]),
+            pd.DataFrame(month_detail_display_rows),
             use_container_width=True,
             height=420,
             hide_index=True,
