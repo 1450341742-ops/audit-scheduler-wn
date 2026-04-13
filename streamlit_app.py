@@ -1017,11 +1017,11 @@ def ensure_support_tables():
                 id INTEGER PRIMARY KEY,
                 task_id INTEGER NOT NULL,
                 auditor_id INTEGER,
-                person_name TEXT NOT NULL,
+                person_name TEXT,
                 is_part_time INTEGER NOT NULL DEFAULT 0,
-                role TEXT NOT NULL DEFAULT 'member',
-                start_date TEXT NOT NULL,
-                end_date TEXT NOT NULL,
+                role TEXT,
+                start_date TEXT,
+                end_date TEXT,
                 notes TEXT,
                 created_at TEXT,
                 updated_at TEXT
@@ -1030,22 +1030,40 @@ def ensure_support_tables():
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS progress_targets (
                 id INTEGER PRIMARY KEY,
-                period_type TEXT NOT NULL,
-                year INTEGER NOT NULL,
-                period_value INTEGER NOT NULL DEFAULT 0,
-                target_projects INTEGER NOT NULL DEFAULT 0,
-                target_staffing INTEGER NOT NULL DEFAULT 0,
+                period_type TEXT,
+                year INTEGER,
+                period_value INTEGER,
+                target_projects INTEGER DEFAULT 0,
+                target_staffing INTEGER DEFAULT 0,
                 updated_at TEXT
             )
         """))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS auditor_month_targets (
-                auditor_id INTEGER PRIMARY KEY,
-                monthly_target INTEGER NOT NULL DEFAULT 6,
+                id INTEGER PRIMARY KEY,
+                auditor_id INTEGER,
+                monthly_target INTEGER DEFAULT 4,
                 updated_at TEXT
             )
         """))
 
+    def _add_col_if_missing(table_name: str, column_name: str, ddl_sql: str):
+        try:
+            with engine.begin() as conn:
+                if IS_SQLITE:
+                    cols = conn.execute(text(f"PRAGMA table_info({table_name})")).mappings().all()
+                    existing = {str(c.get("name")) for c in cols}
+                    if column_name not in existing:
+                        conn.execute(text(ddl_sql))
+                else:
+                    conn.execute(text(ddl_sql))
+        except Exception:
+            pass
+
+    _add_col_if_missing("part_time_staff", "updated_at", "ALTER TABLE part_time_staff ADD COLUMN updated_at TEXT")
+    _add_col_if_missing("direct_assignments", "updated_at", "ALTER TABLE direct_assignments ADD COLUMN updated_at TEXT")
+    _add_col_if_missing("progress_targets", "updated_at", "ALTER TABLE progress_targets ADD COLUMN updated_at TEXT")
+    _add_col_if_missing("auditor_month_targets", "updated_at", "ALTER TABLE auditor_month_targets ADD COLUMN updated_at TEXT")
 
 def ensure_extra_tables():
     ensure_support_tables()
@@ -1108,14 +1126,30 @@ def delete_part_time_staff(row_id: int):
 
 def get_direct_assignments(task_id: int) -> list[dict]:
     ensure_support_tables()
-    with engine.begin() as conn:
-        rows = conn.execute(text("""
-            SELECT id, task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, notes, created_at, updated_at
-            FROM direct_assignments
-            WHERE task_id=:task_id
-            ORDER BY start_date ASC, id ASC
-        """), {"task_id": int(task_id)}).mappings().all()
-    return [dict(r) for r in rows]
+    sql_with_updated = """
+        SELECT id, task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, notes, created_at, updated_at
+        FROM direct_assignments
+        WHERE task_id=:task_id
+        ORDER BY start_date ASC, id ASC
+    """
+    sql_legacy = """
+        SELECT id, task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, notes, created_at
+        FROM direct_assignments
+        WHERE task_id=:task_id
+        ORDER BY start_date ASC, id ASC
+    """
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(text(sql_with_updated), {"task_id": int(task_id)}).mappings().all()
+    except Exception:
+        with engine.begin() as conn:
+            rows = conn.execute(text(sql_legacy), {"task_id": int(task_id)}).mappings().all()
+    out = []
+    for r in rows:
+        item = dict(r)
+        item.setdefault("updated_at", None)
+        out.append(item)
+    return out
 
 
 def replace_direct_assignments(task_id: int, rows: list[dict]):
