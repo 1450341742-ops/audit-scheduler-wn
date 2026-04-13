@@ -1505,6 +1505,8 @@ def render_calendar_day_popover(day_obj: date, items: list[dict], use_explicit_h
 
     grouped = {}
     for item in items:
+        if not (item.get("project_name") or ""):
+            continue
         key = (
             item.get("project_name") or "",
             item.get("site_city") or "",
@@ -2821,6 +2823,7 @@ def update_schedule_detail_row(source_type: str, record_id: int, task_id: int, r
 
 # -------------------- 日历视图 --------------------
 if page == "日历视图":
+    cleanup_orphan_calendar_rows()
     st.subheader("日历视图")
     st.caption("按月查看排班、节假日标识，并支持导出 ICS 日历。")
 
@@ -2876,7 +2879,8 @@ if page == "日历视图":
             """),
             {"month_start": d2s(month_start), "month_end": d2s(month_end)},
         ).mappings().all()
-        direct_rows_raw = [dict(r) for r in rows]
+        # 过滤已删除任务留下的脏数据
+        direct_rows_raw = [dict(r) for r in rows if r.get("project_name")]
 
     direct_task_ids = {int(r["task_id"]) for r in direct_rows_raw}
     all_schedules_rows = []
