@@ -112,9 +112,11 @@ def get_distance_km(db: Session, from_city: str, to_city: str) -> float:
 
 def build_candidates(db: Session, task: Task, auditors, schedules_all):
     """
-    性能优化版候选池逻辑：
+    稳定版候选池逻辑（保留原功能）：
+    - 只做基础条件筛选
+    - 不因为 need_expert=True 就把所有候选人限制为 A
+    - “A带队”只在 propose_team 阶段限制 leader
     - 预先按 auditor_id 分组排班，避免每个候选人都全表扫描 schedules_all
-    - 其余业务规则保持不变
     """
     task_start = _task_start(task)
     task_end = _task_end(task)
@@ -141,12 +143,10 @@ def build_candidates(db: Session, task: Task, auditors, schedules_all):
 
         if status != "active":
             continue
-
         if required_gender in ("男", "女") and gender and gender != required_gender:
             continue
 
         own_schedules = schedules_by_auditor.get(auditor_id, [])
-
         conflict = False
         for s in own_schedules:
             s_start = getattr(s, "start_date", None)
