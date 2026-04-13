@@ -677,13 +677,6 @@ def get_progress_stats(period_type: str, year: int, period_value: int):
         "project_completion_rate": project_completion_rate,
         "staffing_completion_rate": staffing_completion_rate,
     }
-        )
-    return {
-        "month_start": month_start,
-        "month_end": month_end,
-        "direct_rows_raw": direct_rows_raw,
-        "all_schedules_rows": all_schedules_rows,
-    }
 
 # -------------------- 智能排班 --------------------
 if page == "智能排班":
