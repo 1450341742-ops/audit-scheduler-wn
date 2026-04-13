@@ -1457,24 +1457,44 @@ def render_calendar_day_popover(day_obj: date, items: list[dict], use_explicit_h
         """
         <style>
         div[data-testid="stPopoverBody"]{
-            min-width: 420px !important;
-            max-width: 520px !important;
+            min-width: 480px !important;
+            max-width: 620px !important;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    rows = []
+    grouped = {}
     for item in items:
+        key = (
+            item.get("project_name") or "",
+            item.get("site_city") or "",
+            d2s(item.get("start_date")),
+            d2s(item.get("end_date")),
+            "已定直录" if item.get("source") == "direct" else "标准排班",
+        )
+        grouped.setdefault(key, {"leaders": [], "members": []})
+        person = item.get("auditor_name") or item.get("person_name") or ""
+        if item.get("role") == "leader":
+            if person and person not in grouped[key]["leaders"]:
+                grouped[key]["leaders"].append(person)
+        else:
+            if person and person not in grouped[key]["members"]:
+                grouped[key]["members"].append(person)
+
+    rows = []
+    for (project_name, site_city, start_s, end_s, source_label), people in grouped.items():
+        merged_people = []
+        merged_people.extend(people["leaders"])
+        merged_people.extend([p for p in people["members"] if p not in merged_people])
         rows.append({
-            "项目": item.get("project_name") or "",
-            "城市": item.get("site_city") or "",
-            "人员": item.get("auditor_name") or item.get("person_name") or "",
-            "角色": "组长" if item.get("role") == "leader" else "成员",
-            "开始": d2s(item.get("start_date")),
-            "结束": d2s(item.get("end_date")),
-            "来源": "已定直录" if item.get("source") == "direct" else "标准排班",
+            "项目": project_name,
+            "城市": site_city,
+            "人员": "、".join(merged_people),
+            "开始": start_s,
+            "结束": end_s,
+            "来源": source_label,
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True, height=min(260, 80 + len(rows) * 34))
 
@@ -2585,6 +2605,8 @@ def load_month_schedule_detail_rows(year: int, month: int):
             .all()
         )
         for s in schedules:
+            if not s.task:
+                continue
             rows.append({
                 "来源": "标准排班",
                 "记录ID": int(s.id),
@@ -2610,6 +2632,8 @@ def load_month_schedule_detail_rows(year: int, month: int):
             task_map = {int(t.id): t for t in db.query(Task).all()}
         for r in drows:
             task_obj = task_map.get(int(r["task_id"])) if r.get("task_id") is not None else None
+            if not task_obj:
+                continue
             rows.append({
                 "来源": "已定直录",
                 "记录ID": int(r["id"]),
