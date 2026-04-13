@@ -639,19 +639,56 @@ def build_ics_events(db: Session, auditor_id: int | None = None):
     sch = q.all()
     events = []
     now = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+    # 先按任务聚合，找出负责人和全部成员，避免导入邮箱日历后只看到 leader/member 英文简写
+    grouped = {}
     for s in sch:
-        a = s.auditor
-        t = s.task
-        if not a or not t:
+        if not s.task or not s.auditor:
             continue
-        start = datetime.combine(t.start_date, datetime.min.time()).replace(hour=9)
-        actual_end = t.end_date or (t.start_date + timedelta(days=max(1, int(t.required_days or 1)) - 1))
-        if actual_end < t.start_date:
-            actual_end = t.start_date
+        grouped.setdefault(int(s.task_id), []).append(s)
+
+    for task_id, items in grouped.items():
+        task_obj = items[0].task
+        if not task_obj:
+            continue
+
+        leader_names = []
+        member_names = []
+        for s in items:
+            person_name = s.auditor.name if s.auditor else ""
+            if not person_name:
+                continue
+            if str(s.role) == "leader":
+                if person_name not in leader_names:
+                    leader_names.append(person_name)
+            else:
+                if person_name not in member_names:
+                    member_names.append(person_name)
+
+        leader_text = "、".join(leader_names) if leader_names else "未设置负责人"
+        member_text = "、".join(member_names)
+
+        start = datetime.combine(task_obj.start_date, datetime.min.time()).replace(hour=9)
+        actual_end = task_obj.end_date or (task_obj.start_date + timedelta(days=max(1, int(task_obj.required_days or 1)) - 1))
+        if actual_end < task_obj.start_date:
+            actual_end = task_obj.start_date
         end_exclusive = datetime.combine(actual_end + timedelta(days=1), datetime.min.time()).replace(hour=18)
-        uid = f"wnrh-{s.id}@scheduler"
-        summary = f"{t.project_name}｜{t.site_city}｜{s.role}"
-        desc = f"客户:{t.customer_name or ''}\n人数:{t.required_headcount} 天数:{t.required_days}\n负责人/成员:{a.name}"
+
+        uid = f"wnrh-task-{task_id}@scheduler"
+        merged_people = []
+        merged_people.extend(leader_names)
+        merged_people.extend([p for p in member_names if p not in merged_people])
+
+        summary = f"{task_obj.project_name}｜{'、'.join(merged_people)}"
+        desc = (
+            f"项目：{task_obj.project_name}\n"
+            f"城市：{task_obj.site_city}\n"
+            f"客户：{task_obj.customer_name or ''}\n"
+            f"负责人：{leader_text}\n"
+            f"成员：{member_text}\n"
+            f"人数：{task_obj.required_headcount} 天数：{task_obj.required_days}"
+        )
+
         events.extend(
             [
                 "BEGIN:VEVENT",
@@ -664,6 +701,7 @@ def build_ics_events(db: Session, auditor_id: int | None = None):
                 "END:VEVENT",
             ]
         )
+
     lines = [
         "BEGIN:VCALENDAR",
         "VERSION:2.0",
