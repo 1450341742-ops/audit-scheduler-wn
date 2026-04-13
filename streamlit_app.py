@@ -679,6 +679,31 @@ def get_progress_stats(period_type: str, year: int, period_value: int):
     }
 
 
+
+# 页面常量兜底：避免在导航前未定义
+try:
+    ALL_PAGES
+except NameError:
+    ALL_PAGES = [
+        "智能排班",
+        "批量排班",
+        "稽查员管理",
+        "任务管理",
+        "指标统计",
+        "兼职库",
+        "城市距离",
+        "城市坐标",
+        "模板导入",
+        "日历视图",
+        "账号管理",
+        "数据清理",
+    ]
+
+try:
+    DEFAULT_NORMAL_PAGES
+except NameError:
+    DEFAULT_NORMAL_PAGES = ["任务管理", "稽查员管理", "日历视图", "指标统计"]
+
 # 侧边导航兜底：避免 page 未定义导致页面分支报错
 try:
     page
