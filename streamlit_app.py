@@ -301,8 +301,6 @@ def seed_cities_if_needed(db: Session):
     safe_commit(db, "初始化城市坐标")
 
 
-initialize_app_once()
-
 # -------------------- 权限 --------------------
 ALL_PAGES = [
     "智能排班",
