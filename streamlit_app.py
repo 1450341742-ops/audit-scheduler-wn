@@ -110,18 +110,17 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
-try:
-    ensure_extra_tables
-except NameError:
-    def ensure_extra_tables():
-        try:
-            ensure_support_tables()
-        except Exception:
-            return None
-
-
 # -------------------- 初始化 --------------------
+@st.cache_resource(show_spinner=False)
+def initialize_app_once():
+    Base.metadata.create_all(bind=engine)
+    ensure_schema()
+    ensure_support_tables()
+    with db_session() as db:
+        seed_city_distances_if_needed(db)
+        seed_cities_if_needed(db)
+    bootstrap_auth_users_if_needed()
+    return True
 
 
 @contextmanager
@@ -260,402 +259,6 @@ def normalize_text(v) -> str:
     return str(v).strip()
 
 
-# -------------------- 扩展功能支持表 / 缺失函数修复 --------------------
-def ensure_support_tables():
-    with engine.begin() as conn:
-        conn.execute(text('''
-            CREATE TABLE IF NOT EXISTS progress_targets (
-                id INTEGER PRIMARY KEY,
-                period_type TEXT NOT NULL,
-                year INTEGER NOT NULL,
-                period_value INTEGER NOT NULL DEFAULT 0,
-                target_projects INTEGER NOT NULL DEFAULT 0,
-                target_staffing INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT
-            )
-        '''))
-        conn.execute(text('''
-            CREATE TABLE IF NOT EXISTS part_time_staff (
-                id INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                base_city TEXT,
-                note TEXT,
-                is_active INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT
-            )
-        '''))
-        conn.execute(text('''
-            CREATE TABLE IF NOT EXISTS direct_assignments (
-                id INTEGER PRIMARY KEY,
-                task_id INTEGER NOT NULL,
-                auditor_id INTEGER,
-                person_name TEXT NOT NULL,
-                is_part_time INTEGER NOT NULL DEFAULT 0,
-                role TEXT NOT NULL DEFAULT 'member',
-                start_date TEXT NOT NULL,
-                end_date TEXT NOT NULL,
-                notes TEXT,
-                created_at TEXT
-            )
-        '''))
-        conn.execute(text('''
-            CREATE TABLE IF NOT EXISTS auditor_monthly_targets (
-                auditor_id INTEGER PRIMARY KEY,
-                monthly_target INTEGER NOT NULL DEFAULT 4,
-                updated_at TEXT
-            )
-        '''))
-        try:
-            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_progress_targets_period ON progress_targets(period_type, year, period_value)"))
-        except Exception:
-            pass
-
-
-def parse_name_list(raw) -> list[str]:
-    s = normalize_text(raw)
-    if not s:
-        return []
-    for sep in ["，", "、", ";", "；", "/", "|", "\n"]:
-        s = s.replace(sep, ",")
-    out = []
-    seen = set()
-    for x in s.split(","):
-        x = x.strip()
-        if x and x not in seen:
-            out.append(x)
-            seen.add(x)
-    return out
-
-
-def get_part_time_staff_rows(active_only: bool = False) -> list[dict]:
-    ensure_support_tables()
-    with engine.begin() as conn:
-        sql = "SELECT id, name, base_city, note, is_active, created_at FROM part_time_staff"
-        if active_only:
-            sql += " WHERE is_active=1"
-        sql += " ORDER BY id DESC"
-        rows = conn.execute(text(sql)).mappings().all()
-    return [dict(r) for r in rows]
-
-
-def save_part_time_staff(name: str, base_city: str = '', note: str = '', is_active: bool = True):
-    ensure_support_tables()
-    clean_name = normalize_text(name)
-    if not clean_name:
-        return False, '兼职姓名不能为空'
-    params = {
-        'name': clean_name,
-        'base_city': normalize_text(base_city),
-        'note': normalize_text(note),
-        'is_active': 1 if is_active else 0,
-        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-    }
-    with engine.begin() as conn:
-        exists = conn.execute(text('SELECT id FROM part_time_staff WHERE name=:name'), {'name': clean_name}).mappings().first()
-        if exists:
-            conn.execute(text('UPDATE part_time_staff SET base_city=:base_city, note=:note, is_active=:is_active WHERE id=:id'), {**params, 'id': int(exists['id'])})
-            return True, '兼职人员已更新'
-        next_id = conn.execute(text('SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM part_time_staff')).mappings().first()['next_id']
-        conn.execute(text('INSERT INTO part_time_staff (id, name, base_city, note, is_active, created_at) VALUES (:id, :name, :base_city, :note, :is_active, :created_at)'), {**params, 'id': int(next_id)})
-    return True, '兼职人员已保存'
-
-
-def delete_part_time_staff(row_id: int):
-    ensure_support_tables()
-    with engine.begin() as conn:
-        conn.execute(text('DELETE FROM part_time_staff WHERE id=:id'), {'id': int(row_id)})
-    return True, '兼职人员已删除'
-
-
-def get_direct_assignments(task_id: int) -> list[dict]:
-    ensure_support_tables()
-    with engine.begin() as conn:
-        rows = conn.execute(text('SELECT id, task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, notes, created_at FROM direct_assignments WHERE task_id=:task_id ORDER BY id ASC'), {'task_id': int(task_id)}).mappings().all()
-    out = []
-    for r in rows:
-        item = dict(r)
-        item['is_part_time'] = bool(int(item.get('is_part_time') or 0))
-        item['start_date'] = item.get('start_date') or ''
-        item['end_date'] = item.get('end_date') or ''
-        out.append(item)
-    return out
-
-
-def replace_direct_assignments(task_id: int, rows_to_save: list[dict]):
-    ensure_support_tables()
-    with engine.begin() as conn:
-        conn.execute(text('DELETE FROM direct_assignments WHERE task_id=:task_id'), {'task_id': int(task_id)})
-        next_id_row = conn.execute(text('SELECT COALESCE(MAX(id), 0) AS max_id FROM direct_assignments')).mappings().first()
-        next_id = int(next_id_row['max_id'] or 0) + 1
-        for r in rows_to_save or []:
-            sd = safe_parse_date(r.get('start_date'))
-            ed = safe_parse_date(r.get('end_date'))
-            if not sd or not ed:
-                continue
-            conn.execute(text('''
-                INSERT INTO direct_assignments (id, task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, notes, created_at)
-                VALUES (:id, :task_id, :auditor_id, :person_name, :is_part_time, :role, :start_date, :end_date, :notes, :created_at)
-            '''), {
-                'id': next_id,
-                'task_id': int(task_id),
-                'auditor_id': r.get('auditor_id'),
-                'person_name': normalize_text(r.get('person_name')),
-                'is_part_time': 1 if bool(r.get('is_part_time')) else 0,
-                'role': 'leader' if str(r.get('role')) == 'leader' else 'member',
-                'start_date': d2s(sd),
-                'end_date': d2s(ed),
-                'notes': normalize_text(r.get('notes')),
-                'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            })
-            next_id += 1
-    return True
-
-
-def sync_task_schedules_from_direct_assignments(task: Task):
-    ensure_support_tables()
-    direct_rows = get_direct_assignments(int(task.id))
-    if not direct_rows:
-        return False, '未找到已定项目人员'
-
-    with db_session() as db:
-        db.query(Schedule).filter(Schedule.task_id == int(task.id)).delete()
-        for r in direct_rows:
-            if bool(r.get('is_part_time')):
-                continue
-            auditor_id = r.get('auditor_id')
-            if not auditor_id:
-                auditor = db.query(Auditor).filter(Auditor.name == normalize_text(r.get('person_name'))).first()
-                auditor_id = int(auditor.id) if auditor else None
-            else:
-                auditor = db.query(Auditor).filter(Auditor.id == int(auditor_id)).first()
-            if not auditor_id or not auditor:
-                continue
-            sd = safe_parse_date(r.get('start_date')) or task.start_date
-            ed = safe_parse_date(r.get('end_date')) or task.end_date or task.start_date
-            from_city = compute_from_city(auditor, task)
-            km = get_distance_km(db, from_city, task.site_city)
-            db.add(Schedule(
-                task_id=int(task.id),
-                auditor_id=int(auditor_id),
-                role='leader' if str(r.get('role')) == 'leader' else 'member',
-                start_date=sd,
-                end_date=ed,
-                travel_from_city=from_city,
-                travel_to_city=task.site_city,
-                distance_km=float(km),
-                score=0.0,
-                status='confirmed',
-            ))
-        ok = safe_commit(db, f'同步已定项目排班#{task.id}')
-        if not ok:
-            return False, '同步失败'
-    return True, '已按已定项目人员直接录入排班'
-
-
-def auto_fill_direct_assignments_from_specified(task_id: int, overwrite: bool = True):
-    ensure_support_tables()
-    with db_session() as db:
-        task = db.query(Task).filter(Task.id == int(task_id)).first()
-        if not task:
-            return False, "任务不存在"
-        specified_names = parse_name_list(getattr(task, "specified_auditors", None))
-        if not specified_names:
-            return False, "未填写硬指定人员"
-
-        rows_to_save = []
-        for idx, name in enumerate(specified_names):
-            auditor = db.query(Auditor).filter(Auditor.name == normalize_text(name)).first()
-            rows_to_save.append(
-                {
-                    "auditor_id": int(auditor.id) if auditor else None,
-                    "person_name": normalize_text(name),
-                    "is_part_time": False if auditor else True,
-                    "role": "leader" if idx == 0 else "member",
-                    "start_date": task.start_date,
-                    "end_date": task.end_date or task.start_date,
-                    "notes": "由硬指定人员自动生成",
-                }
-            )
-
-    existing = get_direct_assignments(int(task_id))
-    if existing and not overwrite:
-        with db_session() as db:
-            task = db.query(Task).filter(Task.id == int(task_id)).first()
-            if task:
-                sync_task_schedules_from_direct_assignments(task)
-        return True, "已存在已定项目人员，并已同步到排班记录"
-
-    replace_direct_assignments(int(task_id), rows_to_save)
-    with db_session() as db:
-        task = db.query(Task).filter(Task.id == int(task_id)).first()
-        if task:
-            sync_task_schedules_from_direct_assignments(task)
-    return True, "已根据硬指定人员自动生成直录排班，并同步到排班记录"
-
-
-def _get_period_range(period_type: str, year: int, period_value: int):
-    if period_type == 'monthly':
-        start_d = date(year, int(period_value), 1)
-        if int(period_value) == 12:
-            end_d = date(year, 12, 31)
-        else:
-            end_d = date(year, int(period_value) + 1, 1) - timedelta(days=1)
-    elif period_type == 'quarterly':
-        q = max(1, min(4, int(period_value or 1)))
-        start_month = (q - 1) * 3 + 1
-        start_d = date(year, start_month, 1)
-        if q == 4:
-            end_d = date(year, 12, 31)
-        else:
-            end_d = date(year, start_month + 3, 1) - timedelta(days=1)
-    else:
-        start_d = date(year, 1, 1)
-        end_d = date(year, 12, 31)
-    return start_d, end_d
-
-
-def get_target_row(period_type: str, year: int, period_value: int) -> dict:
-    ensure_support_tables()
-    with engine.begin() as conn:
-        row = conn.execute(text('SELECT period_type, year, period_value, target_projects, target_staffing, updated_at FROM progress_targets WHERE period_type=:period_type AND year=:year AND period_value=:period_value'), {'period_type': period_type, 'year': int(year), 'period_value': int(period_value or 0)}).mappings().first()
-    if row:
-        return dict(row)
-    return {'period_type': period_type, 'year': int(year), 'period_value': int(period_value or 0), 'target_projects': 0, 'target_staffing': 0}
-
-
-def save_target_row(period_type: str, year: int, period_value: int, target_projects: int, target_staffing: int):
-    ensure_support_tables()
-    params = {'period_type': period_type, 'year': int(year), 'period_value': int(period_value or 0), 'target_projects': int(target_projects or 0), 'target_staffing': int(target_staffing or 0), 'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-    with engine.begin() as conn:
-        row = conn.execute(text('SELECT id FROM progress_targets WHERE period_type=:period_type AND year=:year AND period_value=:period_value'), params).mappings().first()
-        if row:
-            conn.execute(text('UPDATE progress_targets SET target_projects=:target_projects, target_staffing=:target_staffing, updated_at=:updated_at WHERE id=:id'), {**params, 'id': int(row['id'])})
-        else:
-            next_id = conn.execute(text('SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM progress_targets')).mappings().first()['next_id']
-            conn.execute(text('INSERT INTO progress_targets (id, period_type, year, period_value, target_projects, target_staffing, updated_at) VALUES (:id, :period_type, :year, :period_value, :target_projects, :target_staffing, :updated_at)'), {**params, 'id': int(next_id)})
-    return True
-
-
-def get_period_completed_counts(period_type: str, year: int, period_value: int):
-    start_d, end_d = _get_period_range(period_type, int(year), int(period_value or 0))
-    today = date.today()
-    with db_session() as db:
-        tasks = db.query(Task).filter(Task.start_date >= start_d, Task.start_date <= end_d).order_by(Task.start_date.asc(), Task.id.asc()).all()
-    recorded_tasks = list(tasks)
-    completed_tasks = [t for t in recorded_tasks if (t.end_date or t.start_date) < today]
-    return start_d, end_d, recorded_tasks, completed_tasks
-
-
-def get_monthly_target_value(year: int, month: int) -> int:
-    row = get_target_row('monthly', int(year), int(month))
-    return int(row.get('target_projects', 0) or 0)
-
-
-def get_annual_monthly_progress(year: int) -> pd.DataFrame:
-    rows = []
-    for m in range(1, 13):
-        start_d, end_d = _get_period_range('monthly', int(year), int(m))
-        today = date.today()
-        with db_session() as db:
-            tasks = db.query(Task).filter(Task.start_date >= start_d, Task.start_date <= end_d).all()
-        actual = sum(1 for t in tasks if (t.end_date or t.start_date) < today)
-        plan = get_monthly_target_value(int(year), int(m))
-        rows.append({'月份': f'{m}月', '实际完成': int(actual), '计划完成': int(plan)})
-    return pd.DataFrame(rows)
-
-
-def get_auditor_monthly_target_map() -> dict[int, int]:
-    ensure_support_tables()
-    with engine.begin() as conn:
-        rows = conn.execute(text('SELECT auditor_id, monthly_target FROM auditor_monthly_targets')).mappings().all()
-    return {int(r['auditor_id']): int(r.get('monthly_target') or 4) for r in rows}
-
-
-def save_auditor_monthly_target(auditor_id: int, monthly_target: int):
-    ensure_support_tables()
-    params = {
-        'auditor_id': int(auditor_id),
-        'monthly_target': int(monthly_target or 0),
-        'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    }
-    with engine.begin() as conn:
-        row = conn.execute(text('SELECT auditor_id FROM auditor_monthly_targets WHERE auditor_id=:auditor_id'), params).mappings().first()
-        if row:
-            conn.execute(text('UPDATE auditor_monthly_targets SET monthly_target=:monthly_target, updated_at=:updated_at WHERE auditor_id=:auditor_id'), params)
-        else:
-            conn.execute(text('INSERT INTO auditor_monthly_targets (auditor_id, monthly_target, updated_at) VALUES (:auditor_id, :monthly_target, :updated_at)'), params)
-    return True
-
-
-def get_auditor_period_stats(period_type: str, year: int, period_value: int) -> pd.DataFrame:
-    start_d, end_d = _get_period_range(period_type, int(year), int(period_value or 0))
-    today = date.today()
-    months_multiplier = {'monthly': 1, 'quarterly': 3, 'yearly': 12}.get(period_type, 1)
-    target_map = get_auditor_monthly_target_map()
-    with db_session() as db:
-        auditors = db.query(Auditor).order_by(Auditor.id.asc()).all()
-        schedules = db.query(Schedule).join(Task, Task.id == Schedule.task_id).filter(Task.start_date >= start_d, Task.start_date <= end_d).all()
-        task_map = {int(t.id): t for t in db.query(Task).filter(Task.start_date >= start_d, Task.start_date <= end_d).all()}
-    completed_pairs = set()
-    for s in schedules:
-        task = task_map.get(int(s.task_id))
-        if not task:
-            continue
-        task_end = task.end_date or task.start_date
-        if task_end < today:
-            completed_pairs.add((int(s.auditor_id), int(s.task_id)))
-    completed_by_auditor = {}
-    for aid, tid in completed_pairs:
-        completed_by_auditor[aid] = completed_by_auditor.get(aid, 0) + 1
-    rows = []
-    for a in auditors:
-        monthly_target = int(target_map.get(int(a.id), 4) or 4)
-        plan = monthly_target * months_multiplier
-        actual = int(completed_by_auditor.get(int(a.id), 0))
-        rows.append({
-            '稽查员': a.name,
-            '月度计划': monthly_target,
-            '本周期计划': int(plan),
-            '本周期实际完成': int(actual),
-            '完成率': round(actual / plan * 100, 1) if plan else 0.0,
-        })
-    return pd.DataFrame(rows)
-
-
-def get_progress_stats(period_type: str, year: int, period_value: int):
-    start_d, end_d = _get_period_range(period_type, int(year), int(period_value or 0))
-    today = date.today()
-    with db_session() as db:
-        tasks = db.query(Task).filter(Task.start_date >= start_d, Task.start_date <= end_d).order_by(Task.start_date.asc(), Task.id.asc()).all()
-        schedules = db.query(Schedule).filter(Schedule.start_date >= start_d, Schedule.start_date <= end_d).all()
-        auditor_map = {int(a.id): a for a in db.query(Auditor).all()}
-    recorded_projects = len(tasks)
-    completed_projects = sum(1 for t in tasks if (t.end_date or t.start_date) < today)
-    actual_staffing = len({(int(getattr(s, 'task_id')), int(getattr(s, 'auditor_id'))) for s in schedules})
-    detail_rows = []
-    for t in tasks:
-        task_schedules = [s for s in schedules if int(getattr(s, 'task_id')) == int(t.id)]
-        people = []
-        for s in task_schedules:
-            a = auditor_map.get(int(getattr(s, 'auditor_id')))
-            if a and a.name not in people:
-                people.append(a.name)
-        detail_rows.append({
-            '任务ID': int(t.id),
-            '项目名称': t.project_name or '',
-            '客户名称': t.customer_name or '',
-            '城市': t.site_city or '',
-            '开始日期': d2s(t.start_date),
-            '结束日期': d2s(t.end_date),
-            '是否已完成': '是' if ((t.end_date or t.start_date) < today) else '否',
-            '院次/天数': int(getattr(t, 'required_days', 1) or 1),
-            '计划人数': int(getattr(t, 'required_headcount', 1) or 1),
-            '实际安排人数': len({int(getattr(s, 'auditor_id')) for s in task_schedules}),
-            '安排人员': '、'.join(people),
-        })
-    return start_d, end_d, recorded_projects, completed_projects, actual_staffing, detail_rows
-
-
 def seed_city_distances_if_needed(db: Session):
     seen = set()
     for a, b, km in SEED_CITY_DISTANCES:
@@ -697,25 +300,6 @@ def seed_cities_if_needed(db: Session):
             continue
     safe_commit(db, "初始化城市坐标")
 
-
-
-try:
-    bootstrap_auth_users_if_needed
-except NameError:
-    def bootstrap_auth_users_if_needed():
-        return None
-
-
-@st.cache_resource(show_spinner=False)
-def initialize_app_once():
-    Base.metadata.create_all(bind=engine)
-    ensure_schema()
-    ensure_support_tables()
-    with db_session() as db:
-        seed_city_distances_if_needed(db)
-        seed_cities_if_needed(db)
-    bootstrap_auth_users_if_needed()
-    return True
 
 initialize_app_once()
 
@@ -1004,6 +588,8 @@ def check_login(username: str, password: str) -> bool:
     return str(user.get("password_hash")) == hash_password(str(password))
 
 
+bootstrap_auth_users_if_needed()
+
 
 def render_login():
     st.title(APP_NAME)
@@ -1049,15 +635,15 @@ def ics_escape(s: str) -> str:
 
 
 def build_ics_events(db: Session, auditor_id: int | None = None):
-    q = db.query(Schedule).options(joinedload(Schedule.task), joinedload(Schedule.auditor)).order_by(Schedule.id.desc())
+    q = db.query(Schedule).order_by(Schedule.id.desc())
     if auditor_id:
         q = q.filter(Schedule.auditor_id == auditor_id)
     sch = q.all()
     events = []
     now = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     for s in sch:
-        a = s.auditor
-        t = s.task
+        a = db.query(Auditor).filter(Auditor.id == s.auditor_id).first()
+        t = db.query(Task).filter(Task.id == s.task_id).first()
         if not a or not t:
             continue
         start = datetime.combine(t.start_date, datetime.min.time()).replace(hour=9)
@@ -1218,10 +804,7 @@ def update_task_record(
             s.end_date = ed
             s.travel_to_city = obj.site_city
 
-        ok = safe_commit(db, f"更新任务#{task_id}")
-    if ok and normalize_text(specified_auditors):
-        auto_fill_direct_assignments_from_specified(int(task_id), overwrite=True)
-    return ok
+        return safe_commit(db, f"更新任务#{task_id}")
 
 
 def delete_task_record(task_id: int):
@@ -1297,38 +880,42 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
 
     scheduled_task_ids = {tid for (tid,) in db.query(Schedule.task_id).distinct().all()}
     tasks = db.query(Task).filter(Task.start_date >= d1, Task.start_date <= d2).all()
-    tasks = [t for t in tasks if t.id not in scheduled_task_ids]
     tasks.sort(key=lambda t: (0 if t.need_expert else 1, -int(t.required_headcount or 1), t.start_date))
 
     auditors = db.query(Auditor).all()
     report = {"assigned": [], "skipped": [], "batch_week_counts": {}}
 
     for t in tasks:
+        # 优先处理已定项目 / 硬指定项目
         direct_rows_existing = get_direct_assignments(int(t.id))
         if direct_rows_existing:
-            sync_task_schedules_from_direct_assignments(t)
-            report["assigned"].append(
-                {
+            ok, msg = sync_task_schedules_from_direct_assignments(t)
+            if ok:
+                report["assigned"].append({
                     "task_id": t.id,
                     "project": t.project_name,
-                    "leader": direct_rows_existing[0].get("person_name", ""),
+                    "leader": direct_rows_existing[0].get("person_name", "") if direct_rows_existing else "",
                     "members": [r.get("person_name", "") for r in direct_rows_existing[1:]],
-                }
-            )
+                })
+            else:
+                report["skipped"].append({"task_id": t.id, "project": t.project_name, "reason": msg})
             continue
 
         specified_names = parse_name_list(getattr(t, "specified_auditors", None))
         if specified_names:
-            auto_fill_direct_assignments_from_specified(int(t.id), overwrite=True)
-            sync_task_schedules_from_direct_assignments(t)
-            report["assigned"].append(
-                {
+            ok, msg = auto_fill_direct_assignments_from_specified(int(t.id), overwrite=True)
+            if ok:
+                report["assigned"].append({
                     "task_id": t.id,
                     "project": t.project_name,
                     "leader": specified_names[0] if specified_names else "",
                     "members": specified_names[1:],
-                }
-            )
+                })
+            else:
+                report["skipped"].append({"task_id": t.id, "project": t.project_name, "reason": msg})
+            continue
+
+        if t.id in scheduled_task_ids:
             continue
 
         schedules_all = db.query(Schedule).all()
@@ -1413,6 +1000,427 @@ def run_batch_schedule(db: Session, d1: date, d2: date, mode: str = "greedy"):
     return report
 
 
+
+def ensure_support_tables():
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS part_time_staff (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                base_city TEXT,
+                note TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT,
+                updated_at TEXT
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS direct_assignments (
+                id INTEGER PRIMARY KEY,
+                task_id INTEGER NOT NULL,
+                auditor_id INTEGER,
+                person_name TEXT NOT NULL,
+                is_part_time INTEGER NOT NULL DEFAULT 0,
+                role TEXT NOT NULL DEFAULT 'member',
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                notes TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS progress_targets (
+                id INTEGER PRIMARY KEY,
+                period_type TEXT NOT NULL,
+                year INTEGER NOT NULL,
+                period_value INTEGER NOT NULL DEFAULT 0,
+                target_projects INTEGER NOT NULL DEFAULT 0,
+                target_staffing INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS auditor_month_targets (
+                auditor_id INTEGER PRIMARY KEY,
+                monthly_target INTEGER NOT NULL DEFAULT 6,
+                updated_at TEXT
+            )
+        """))
+
+
+def ensure_extra_tables():
+    ensure_support_tables()
+
+
+def parse_name_list(raw):
+    s = normalize_text(raw)
+    if not s:
+        return []
+    for sep in ["，", "、", ";", "；", "/", "|"]:
+        s = s.replace(sep, ",")
+    return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def get_part_time_staff_rows(active_only: bool = False) -> list[dict]:
+    ensure_support_tables()
+    sql = "SELECT id, name, base_city, note, is_active, created_at, updated_at FROM part_time_staff"
+    params = {}
+    if active_only:
+        sql += " WHERE is_active = 1"
+    sql += " ORDER BY is_active DESC, name ASC"
+    with engine.begin() as conn:
+        rows = conn.execute(text(sql), params).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def save_part_time_staff(name: str, base_city: str = "", note: str = "", is_active: bool = True):
+    ensure_support_tables()
+    name = normalize_text(name)
+    if not name:
+        return False, "兼职姓名不能为空"
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with engine.begin() as conn:
+        existing = conn.execute(text("SELECT id FROM part_time_staff WHERE name=:name"), {"name": name}).mappings().first()
+        if existing:
+            conn.execute(text("""
+                UPDATE part_time_staff
+                SET base_city=:base_city, note=:note, is_active=:is_active, updated_at=:updated_at
+                WHERE name=:name
+            """), {"name": name, "base_city": normalize_text(base_city), "note": normalize_text(note), "is_active": 1 if is_active else 0, "updated_at": now})
+            return True, "兼职人员已更新"
+        next_id = (conn.execute(text("SELECT COALESCE(MAX(id), 0) FROM part_time_staff")).scalar() or 0) + 1
+        conn.execute(text("""
+            INSERT INTO part_time_staff (id, name, base_city, note, is_active, created_at, updated_at)
+            VALUES (:id, :name, :base_city, :note, :is_active, :created_at, :updated_at)
+        """), {"id": next_id, "name": name, "base_city": normalize_text(base_city), "note": normalize_text(note), "is_active": 1 if is_active else 0, "created_at": now, "updated_at": now})
+    return True, "兼职人员已保存"
+
+
+def delete_part_time_staff(row_id: int):
+    ensure_support_tables()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM part_time_staff WHERE id=:id"), {"id": int(row_id)})
+    return True, "兼职人员已删除"
+
+
+def get_direct_assignments(task_id: int) -> list[dict]:
+    ensure_support_tables()
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT id, task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, notes, created_at, updated_at
+            FROM direct_assignments
+            WHERE task_id=:task_id
+            ORDER BY start_date ASC, id ASC
+        """), {"task_id": int(task_id)}).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def replace_direct_assignments(task_id: int, rows: list[dict]):
+    ensure_support_tables()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM direct_assignments WHERE task_id=:task_id"), {"task_id": int(task_id)})
+        next_id = (conn.execute(text("SELECT COALESCE(MAX(id), 0) FROM direct_assignments")).scalar() or 0) + 1
+        for i, r in enumerate(rows or []):
+            conn.execute(text("""
+                INSERT INTO direct_assignments (id, task_id, auditor_id, person_name, is_part_time, role, start_date, end_date, notes, created_at, updated_at)
+                VALUES (:id, :task_id, :auditor_id, :person_name, :is_part_time, :role, :start_date, :end_date, :notes, :created_at, :updated_at)
+            """), {
+                "id": next_id + i,
+                "task_id": int(task_id),
+                "auditor_id": int(r.get("auditor_id")) if r.get("auditor_id") not in (None, "") else None,
+                "person_name": normalize_text(r.get("person_name")),
+                "is_part_time": 1 if bool(r.get("is_part_time")) else 0,
+                "role": "leader" if str(r.get("role")) == "leader" else "member",
+                "start_date": d2s(safe_parse_date(r.get("start_date"))),
+                "end_date": d2s(safe_parse_date(r.get("end_date"))),
+                "notes": normalize_text(r.get("notes")),
+                "created_at": now,
+                "updated_at": now,
+            })
+    return True
+
+
+def auto_fill_direct_assignments_from_specified(task_id: int, overwrite: bool = True):
+    with db_session() as db:
+        task = db.query(Task).filter(Task.id == int(task_id)).first()
+        if not task:
+            return False, "任务不存在"
+        names = parse_name_list(getattr(task, "specified_auditors", None))
+        if not names:
+            return False, "未填写硬指定人员"
+        existing = get_direct_assignments(int(task_id))
+        if existing and not overwrite:
+            return True, "已存在已定项目人员"
+        auditors = db.query(Auditor).all()
+        auditor_name_to_id = {a.name: int(a.id) for a in auditors}
+        rows = []
+        for idx, nm in enumerate(names):
+            rows.append({
+                "auditor_id": auditor_name_to_id.get(nm),
+                "person_name": nm,
+                "is_part_time": auditor_name_to_id.get(nm) is None,
+                "role": "leader" if idx == 0 else "member",
+                "start_date": task.start_date,
+                "end_date": task.end_date or task.start_date,
+                "notes": "由硬指定人员自动生成",
+            })
+    replace_direct_assignments(int(task_id), rows)
+    with db_session() as db:
+        task = db.query(Task).filter(Task.id == int(task_id)).first()
+        if task:
+            return sync_task_schedules_from_direct_assignments(task)
+    return True, "已根据硬指定人员生成直录排班"
+
+
+def sync_task_schedules_from_direct_assignments(task):
+    rows = get_direct_assignments(int(task.id))
+    if not rows:
+        return False, "未找到已定项目人员"
+    with db_session() as db:
+        task_obj = db.query(Task).filter(Task.id == int(task.id)).first()
+        if not task_obj:
+            return False, "任务不存在"
+        db.query(Schedule).filter(Schedule.task_id == int(task.id)).delete()
+        auditor_lookup = {a.id: a for a in db.query(Auditor).all()}
+        for r in rows:
+            auditor_id = r.get("auditor_id")
+            if not auditor_id:
+                continue
+            auditor = auditor_lookup.get(int(auditor_id))
+            if not auditor:
+                continue
+            sd = safe_parse_date(r.get("start_date")) or task_obj.start_date
+            ed = safe_parse_date(r.get("end_date")) or task_obj.end_date or task_obj.start_date
+            from_city = compute_from_city(auditor, task_obj)
+            km = float(get_distance_km(db, from_city, task_obj.site_city))
+            db.add(Schedule(
+                task_id=int(task_obj.id),
+                auditor_id=int(auditor.id),
+                role="leader" if str(r.get("role")) == "leader" else "member",
+                start_date=sd,
+                end_date=ed,
+                travel_from_city=from_city,
+                travel_to_city=task_obj.site_city,
+                distance_km=km,
+                score=0.0,
+                status="confirmed",
+            ))
+        if not safe_commit(db, context=f"同步已定项目到排班 task#{task_obj.id}"):
+            return False, "同步到排班表失败"
+    return True, "已定项目人员已同步到排班记录"
+
+
+def get_period_date_range(period_type: str, year: int, period_value: int):
+    if period_type == "monthly":
+        start_d = date(year, period_value, 1)
+        next_month = (start_d.replace(day=28) + timedelta(days=4)).replace(day=1)
+        end_d = next_month - timedelta(days=1)
+    elif period_type == "quarterly":
+        start_month = 1 + (int(period_value) - 1) * 3
+        start_d = date(year, start_month, 1)
+        end_month_start = date(year + (1 if start_month + 3 > 12 else 0), ((start_month + 2) % 12) + 1, 1)
+        next_month = (end_month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+        end_d = next_month - timedelta(days=1)
+    else:
+        start_d = date(year, 1, 1)
+        end_d = date(year, 12, 31)
+    return start_d, end_d
+
+
+def date_ranges_overlap(a_start, a_end, b_start, b_end) -> bool:
+    if not a_start or not b_start:
+        return False
+    a_end = a_end or a_start
+    b_end = b_end or b_start
+    return not (a_end < b_start or b_end < a_start)
+
+
+def get_target_row(period_type: str, year: int, period_value: int) -> dict:
+    ensure_support_tables()
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT id, period_type, year, period_value, target_projects, target_staffing, updated_at
+            FROM progress_targets
+            WHERE period_type=:period_type AND year=:year AND period_value=:period_value
+        """), {"period_type": period_type, "year": int(year), "period_value": int(period_value)}).mappings().first()
+    return dict(row) if row else {"target_projects": 0, "target_staffing": 0}
+
+
+def save_target_row(period_type: str, year: int, period_value: int, target_projects: int, target_staffing: int):
+    ensure_support_tables()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with engine.begin() as conn:
+        row = conn.execute(text("""
+            SELECT id FROM progress_targets
+            WHERE period_type=:period_type AND year=:year AND period_value=:period_value
+        """), {"period_type": period_type, "year": int(year), "period_value": int(period_value)}).mappings().first()
+        if row:
+            conn.execute(text("""
+                UPDATE progress_targets
+                SET target_projects=:target_projects, target_staffing=:target_staffing, updated_at=:updated_at
+                WHERE id=:id
+            """), {"id": int(row["id"]), "target_projects": int(target_projects), "target_staffing": int(target_staffing), "updated_at": now})
+        else:
+            next_id = (conn.execute(text("SELECT COALESCE(MAX(id), 0) FROM progress_targets")).scalar() or 0) + 1
+            conn.execute(text("""
+                INSERT INTO progress_targets (id, period_type, year, period_value, target_projects, target_staffing, updated_at)
+                VALUES (:id, :period_type, :year, :period_value, :target_projects, :target_staffing, :updated_at)
+            """), {"id": next_id, "period_type": period_type, "year": int(year), "period_value": int(period_value), "target_projects": int(target_projects), "target_staffing": int(target_staffing), "updated_at": now})
+    return True
+
+
+def get_monthly_target_map():
+    ensure_support_tables()
+    with engine.begin() as conn:
+        rows = conn.execute(text("SELECT auditor_id, monthly_target FROM auditor_month_targets")).mappings().all()
+    return {int(r["auditor_id"]): int(r.get("monthly_target") or 6) for r in rows}
+
+
+def save_monthly_target(auditor_id: int, monthly_target: int):
+    ensure_support_tables()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with engine.begin() as conn:
+        row = conn.execute(text("SELECT auditor_id FROM auditor_month_targets WHERE auditor_id=:auditor_id"), {"auditor_id": int(auditor_id)}).mappings().first()
+        if row:
+            conn.execute(text("UPDATE auditor_month_targets SET monthly_target=:monthly_target, updated_at=:updated_at WHERE auditor_id=:auditor_id"),
+                         {"auditor_id": int(auditor_id), "monthly_target": int(monthly_target), "updated_at": now})
+        else:
+            conn.execute(text("INSERT INTO auditor_month_targets (auditor_id, monthly_target, updated_at) VALUES (:auditor_id, :monthly_target, :updated_at)"),
+                         {"auditor_id": int(auditor_id), "monthly_target": int(monthly_target), "updated_at": now})
+    return True
+
+
+def get_progress_stats(period_type: str, year: int, period_value: int):
+    start_d, end_d = get_period_date_range(period_type, year, period_value)
+    today_d = date.today()
+    with db_session() as db:
+        tasks = db.query(Task).order_by(Task.start_date.asc()).all()
+        schedules = db.query(Schedule).options(joinedload(Schedule.auditor)).all()
+
+    in_period_tasks = []
+    for t in tasks:
+        t_start = getattr(t, "start_date", None)
+        t_end = getattr(t, "end_date", None) or t_start
+        if date_ranges_overlap(t_start, t_end, start_d, end_d):
+            in_period_tasks.append(t)
+
+    actual_projects = len({int(t.id) for t in in_period_tasks})
+    completed_projects = len({
+        int(t.id) for t in in_period_tasks
+        if ((getattr(t, "end_date", None) or getattr(t, "start_date", None)) and (getattr(t, "end_date", None) or getattr(t, "start_date", None)) < today_d)
+    })
+
+    staffing_rows = []
+    actual_staffing = 0
+    for s in schedules:
+        s_start = getattr(s, "start_date", None)
+        s_end = getattr(s, "end_date", None) or s_start
+        if date_ranges_overlap(s_start, s_end, start_d, end_d):
+            actual_staffing += 1
+            staffing_rows.append({
+                "项目名称": s.task.project_name if getattr(s, "task", None) else "",
+                "客户名称": s.task.customer_name if getattr(s, "task", None) else "",
+                "城市": s.task.site_city if getattr(s, "task", None) else "",
+                "开始日期": d2s(s_start),
+                "结束日期": d2s(s_end),
+                "稽查员": s.auditor.name if getattr(s, "auditor", None) else "",
+                "角色": "组长" if s.role == "leader" else "成员",
+            })
+
+    detail_rows = []
+    for t in in_period_tasks:
+        detail_rows.append({
+            "项目名称": t.project_name,
+            "客户名称": t.customer_name or "",
+            "城市": t.site_city,
+            "开始日期": d2s(t.start_date),
+            "结束日期": d2s(t.end_date),
+            "状态": "已完成" if ((t.end_date or t.start_date) < today_d) else "进行中/未完成",
+            "硬指定": t.specified_auditors or "",
+        })
+
+    return start_d, end_d, completed_projects, actual_staffing, detail_rows
+
+
+def get_yearly_month_progress(year: int):
+    rows = []
+    for m in range(1, 13):
+        start_d, end_d, actual_projects, actual_staffing, detail_rows = get_progress_stats("monthly", year, m)
+        target = get_target_row("monthly", year, m)
+        rows.append({
+            "月份": f"{m}月",
+            "计划项目完成": int(target.get("target_projects", 0) or 0),
+            "实际项目完成": int(actual_projects),
+            "计划人员院次": int(target.get("target_staffing", 0) or 0),
+            "实际人员院次": int(actual_staffing),
+        })
+    return pd.DataFrame(rows)
+
+
+def get_auditor_completion_df(period_type: str, year: int, period_value: int):
+    start_d, end_d = get_period_date_range(period_type, year, period_value)
+    months_multiplier = 12 if period_type == "yearly" else (3 if period_type == "quarterly" else 1)
+    monthly_target_map = get_monthly_target_map()
+    with db_session() as db:
+        auditors = db.query(Auditor).order_by(Auditor.name.asc()).all()
+        schedules = db.query(Schedule).options(joinedload(Schedule.auditor)).all()
+    actual_map = {}
+    for s in schedules:
+        s_start = getattr(s, "start_date", None)
+        s_end = getattr(s, "end_date", None) or s_start
+        if date_ranges_overlap(s_start, s_end, start_d, end_d):
+            actual_map[int(s.auditor_id)] = int(actual_map.get(int(s.auditor_id), 0)) + 1
+    rows = []
+    for a in auditors:
+        monthly_target = int(monthly_target_map.get(int(a.id), 6) or 6)
+        plan = monthly_target * months_multiplier
+        actual = int(actual_map.get(int(a.id), 0))
+        rows.append({
+            "稽查员": a.name,
+            "月度计划院次": monthly_target,
+            "本周期计划院次": plan,
+            "本周期实际院次": actual,
+            "完成率": round(actual / plan * 100.0, 1) if plan else 0.0,
+        })
+    return pd.DataFrame(rows)
+
+
+def build_calendar_detail_map(merged_rows):
+    event_map = {}
+    for s in merged_rows:
+        cur = s.get("start_date")
+        end_d = s.get("end_date")
+        while cur and end_d and cur <= end_d:
+            event_map.setdefault(cur, []).append(s)
+            cur += timedelta(days=1)
+    return event_map
+
+
+def render_day_detail_panel(calendar_event_map: dict):
+    st.subheader("点击查看某一天的详细安排")
+    day_options = sorted(calendar_event_map.keys())
+    if not day_options:
+        st.info("本月暂无安排")
+        return
+    selected_day = st.selectbox("选择日期", options=day_options, format_func=lambda d: d.strftime("%Y-%m-%d"), key="calendar_day_detail")
+    items = calendar_event_map.get(selected_day, [])
+    rows = []
+    for item in items:
+        rows.append({
+            "日期": selected_day.strftime("%Y-%m-%d"),
+            "项目": item.get("project_name") or "",
+            "城市": item.get("site_city") or "",
+            "人员": item.get("auditor_name") or "",
+            "角色": "组长" if item.get("role") == "leader" else "成员",
+            "开始": d2s(item.get("start_date")),
+            "结束": d2s(item.get("end_date")),
+            "来源": "已定直录" if item.get("source") == "direct" else "标准排班",
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
 def load_day_marks():
     try:
         p = Path(__file__).resolve().parent / "app" / "holidays_cn.json"
@@ -1458,9 +1466,11 @@ if (not is_admin) and (page not in allowed_pages):
     st.error("当前账号无权限访问该板块，请联系主管理员开通。")
     st.stop()
 
+# -------------------- 智能排班 --------------------
+if page == "智能排班":
+    st.subheader("智能排班")
+    st.caption("先按硬约束筛选，再按距离优先 + 适度负荷均衡评分推荐。")
 
-@st.cache_data(show_spinner=False, ttl=30)
-def load_smart_page_payload(_data_version: int):
     with db_session() as db:
         tasks = db.query(Task).order_by(Task.id.desc()).all()
         schedules_recent = (
@@ -1470,108 +1480,25 @@ def load_smart_page_payload(_data_version: int):
             .limit(120)
             .all()
         )
-    task_rows = []
-    for t in tasks:
-        task_rows.append({
-            "id": int(t.id),
-            "project_name": t.project_name or "",
-            "site_city": t.site_city or "",
-            "start_date": d2s(t.start_date),
-            "required_days": int(t.required_days or 1),
-            "required_headcount": int(t.required_headcount or 1),
-            "need_expert": bool(t.need_expert),
-        })
-    schedules_recent_rows = []
-    for s in schedules_recent:
-        schedules_recent_rows.append(
-            {
-                "ID": s.id,
-                "任务": f"#{s.task_id} {(s.task.project_name if s.task else '')}",
-                "人员": f"#{s.auditor_id} {(s.auditor.name if s.auditor else '')} ({(s.auditor.group_level if s.auditor else '')})",
-                "角色": s.role,
-                "时间": f"{d2s(s.start_date)} ~ {d2s(s.end_date)}",
-                "路线": f"{s.travel_from_city} → {s.travel_to_city}",
-                "km": round(float(s.distance_km or 0), 1),
-            }
-        )
-    return {"tasks": task_rows, "schedules_recent_rows": schedules_recent_rows}
-
-
-@st.cache_data(show_spinner=False, ttl=30)
-def load_calendar_page_payload(_data_version: int, year: int, month: int, auditor_id):
-    month_start = date(int(year), int(month), 1)
-    next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
-    month_end = next_month - timedelta(days=1)
-
-    with db_session() as db:
-        all_schedules = (
-            db.query(Schedule)
-            .options(joinedload(Schedule.task), joinedload(Schedule.auditor))
-            .filter(Schedule.start_date <= month_end, Schedule.end_date >= month_start)
-            .order_by(Schedule.start_date.asc())
-            .all()
-        )
-
-    ensure_extra_tables()
-    with engine.begin() as conn:
-        rows = conn.execute(
-            text("""
-                SELECT da.id, da.task_id, da.auditor_id, da.person_name, da.is_part_time, da.role, da.start_date, da.end_date, da.notes,
-                       t.project_name, t.site_city
-                FROM direct_assignments da
-                LEFT JOIN tasks t ON da.task_id = t.id
-                WHERE da.start_date <= :month_end AND da.end_date >= :month_start
-                ORDER BY da.start_date ASC, da.person_name ASC
-            """),
-            {"month_start": d2s(month_start), "month_end": d2s(month_end)},
-        ).mappings().all()
-        direct_rows_raw = [dict(r) for r in rows]
-
-    direct_task_ids = {int(r["task_id"]) for r in direct_rows_raw}
-    all_schedules_rows = []
-    for s in all_schedules:
-        if int(s.task_id) in direct_task_ids:
-            continue
-        if auditor_id and s.auditor_id != auditor_id:
-            continue
-        all_schedules_rows.append(
-            {
-                "id": s.id,
-                "auditor_id": s.auditor_id,
-                "auditor_name": (s.auditor.name if s.auditor else ""),
-                "task_id": s.task_id,
-                "project_name": (s.task.project_name if s.task else ""),
-                "site_city": (s.task.site_city if s.task else ""),
-                "role": s.role,
-                "start_date": s.start_date,
-                "end_date": s.end_date,
-                "travel_from_city": s.travel_from_city,
-                "travel_to_city": s.travel_to_city,
-                "distance_km": float(s.distance_km or 0),
-                "source": "schedule",
-            }
-        )
-    return {
-        "month_start": month_start,
-        "month_end": month_end,
-        "direct_rows_raw": direct_rows_raw,
-        "all_schedules_rows": all_schedules_rows,
-    }
-
-# -------------------- 智能排班 --------------------
-if page == "智能排班":
-    st.subheader("智能排班")
-    st.caption("先按硬约束筛选，再按距离优先 + 适度负荷均衡评分推荐。")
-
-    payload = load_smart_page_payload(get_data_version())
-    tasks = payload["tasks"]
-    schedules_recent_rows = payload["schedules_recent_rows"]
+        schedules_recent_rows = []
+        for s in schedules_recent:
+            schedules_recent_rows.append(
+                {
+                    "ID": s.id,
+                    "任务": f"#{s.task_id} {(s.task.project_name if s.task else '')}",
+                    "人员": f"#{s.auditor_id} {(s.auditor.name if s.auditor else '')} ({(s.auditor.group_level if s.auditor else '')})",
+                    "角色": s.role,
+                    "时间": f"{d2s(s.start_date)} ~ {d2s(s.end_date)}",
+                    "路线": f"{s.travel_from_city} → {s.travel_to_city}",
+                    "km": round(float(s.distance_km or 0), 1),
+                }
+            )
 
     if not tasks:
         st.info("请先在【任务管理】中录入任务。")
     else:
         task_options = {
-            f"#{t['id']} {t['project_name']}｜{t['site_city']}｜{t['start_date']}｜{t['required_days']}天｜{t['required_headcount']}人": t['id']
+            f"#{t.id} {t.project_name}｜{t.site_city}｜{d2s(t.start_date)}｜{t.required_days}天｜{t.required_headcount}人": t.id
             for t in tasks
         }
         selected_label = st.selectbox("选择任务", list(task_options.keys()), key="smart_task_select")
@@ -1765,6 +1692,10 @@ elif page == "稽查员管理":
                     )
                     if not safe_commit(db, context=f"新增稽查员：{name.strip()}"):
                         st.stop()
+                with db_session() as db:
+                    task_obj = db.query(Task).order_by(Task.id.desc()).first()
+                if task_obj and parse_name_list(task_obj.specified_auditors or ""):
+                    auto_fill_direct_assignments_from_specified(int(task_obj.id), overwrite=True)
                 clear_runtime_caches_after_data_change()
                 st.success("已新增")
                 st.rerun()
@@ -1909,9 +1840,6 @@ elif page == "任务管理":
                     )
                     if not safe_commit(db, context=f"新增任务：{project_name.strip()}"):
                         st.stop()
-                    new_task_id = int(db.query(Task.id).order_by(Task.id.desc()).first()[0])
-                if specified.strip():
-                    auto_fill_direct_assignments_from_specified(new_task_id, overwrite=True)
                 clear_runtime_caches_after_data_change()
                 st.success("已新增")
                 st.rerun()
@@ -2097,9 +2025,9 @@ elif page == "任务管理":
                 ok, msg = sync_task_schedules_from_direct_assignments(selected_task)
                 clear_runtime_caches_after_data_change()
                 if ok:
-                    st.success("已定项目人员已保存，并已同步到日历排班")
+                    st.success("已定项目人员已保存，并同步到排班记录")
                 else:
-                    st.warning("已定项目人员已保存，但同步到日历排班失败：" + str(msg))
+                    st.warning(msg)
                 st.rerun()
 
             if sync_direct:
@@ -2137,68 +2065,24 @@ elif page == "指标统计":
     with st.form("target_form", clear_on_submit=False):
         c1, c2 = st.columns(2)
         target_projects = c1.number_input("院次指标数量", min_value=0, value=int(target.get("target_projects", 0) or 0), step=1)
-        target_staffing = c2.number_input("人员安排指标数量", min_value=0, value=int(target.get("target_staffing", 0) or 0), step=1)
+        target_staffing = c2.number_input("人员院次安排数量", min_value=0, value=int(target.get("target_staffing", 0) or 0), step=1)
         if st.form_submit_button("保存指标", type="primary"):
             save_target_row(period_type, int(year), int(period_value), int(target_projects), int(target_staffing))
             st.success("指标已保存")
             st.rerun()
 
-    start_d, end_d, recorded_projects, completed_projects, actual_staffing, detail_rows = get_progress_stats(period_type, int(year), int(period_value))
+    start_d, end_d, actual_projects, actual_staffing, detail_rows = get_progress_stats(period_type, int(year), int(period_value))
     target = get_target_row(period_type, int(year), int(period_value))
     t_projects = int(target.get("target_projects", 0) or 0)
     t_staff = int(target.get("target_staffing", 0) or 0)
-    complete_rate = round(completed_projects / t_projects * 100, 1) if t_projects else 0.0
-    staffing_rate = round(actual_staffing / t_staff * 100, 1) if t_staff else 0.0
-
-    st.write(f"统计区间：{d2s(start_d)} ~ {d2s(end_d)}")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("院次目标数", t_projects)
-    m2.metric("已录入院次数", recorded_projects)
-    m3.metric("已完成院次数", completed_projects)
-    m4.metric("院次完成率", f"{complete_rate}%")
 
     summary_df = pd.DataFrame([
-        {"指标": "院次目标数", "目标": t_projects, "实际": completed_projects, "完成率": f"{complete_rate}%"},
-        {"指标": "人员安排数", "目标": t_staff, "实际": actual_staffing, "完成率": f"{staffing_rate}%"},
-        {"指标": "已录入院次数", "目标": recorded_projects, "实际": recorded_projects, "完成率": "100.0%"},
+        {"指标": "已完成院次数", "目标": t_projects, "实际": actual_projects, "完成率": f"{round(actual_projects / t_projects * 100, 1) if t_projects else 0.0}%"},
+        {"指标": "人员院次安排数", "目标": t_staff, "实际": actual_staffing, "完成率": f"{round(actual_staffing / t_staff * 100, 1) if t_staff else 0.0}%"},
     ])
+    st.write(f"统计区间：{d2s(start_d)} ~ {d2s(end_d)}")
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
     st.bar_chart(summary_df.set_index("指标")[["目标", "实际"]])
-
-    if period_type == "yearly":
-        st.subheader("年度视图：每月计划完成 vs 实际完成")
-        annual_df = get_annual_monthly_progress(int(year))
-        st.dataframe(annual_df, use_container_width=True, hide_index=True)
-        st.bar_chart(annual_df.set_index("月份")[["计划完成", "实际完成"]])
-        st.line_chart(annual_df.set_index("月份")[["计划完成", "实际完成"]])
-
-    st.subheader("稽查员计划与实际完成对比")
-    with db_session() as db:
-        auditors = db.query(Auditor).order_by(Auditor.id.asc()).all()
-    target_map = get_auditor_monthly_target_map()
-    if auditors:
-        plan_rows = []
-        for a in auditors:
-            plan_rows.append({
-                '稽查员ID': int(a.id),
-                '稽查员': a.name,
-                '每月计划院次数': int(target_map.get(int(a.id), 4) or 4),
-            })
-        edit_df = st.data_editor(pd.DataFrame(plan_rows), use_container_width=True, hide_index=True, num_rows='fixed', key='auditor_plan_editor')
-        if st.button('保存每人月度计划院次数'):
-            for _, r in pd.DataFrame(edit_df).iterrows():
-                save_auditor_monthly_target(int(r['稽查员ID']), int(r['每月计划院次数']))
-            st.success('已保存每位稽查员月度计划院次数')
-            st.rerun()
-
-    auditor_stats_df = get_auditor_period_stats(period_type, int(year), int(period_value))
-    if not auditor_stats_df.empty:
-        st.dataframe(auditor_stats_df, use_container_width=True, hide_index=True)
-        chart_df = auditor_stats_df.set_index('稽查员')[["本周期计划", "本周期实际完成"]]
-        st.bar_chart(chart_df)
-        st.line_chart(chart_df)
-    else:
-        st.info("暂无稽查员统计数据")
 
     st.subheader("项目完成进度及人员安排进度明细")
     if detail_rows:
@@ -2206,6 +2090,39 @@ elif page == "指标统计":
     else:
         st.info("该统计区间暂无项目数据")
 
+    if period_type == "yearly":
+        st.divider()
+        st.subheader("年度视图：每月计划与实际完成")
+        ym_df = get_yearly_month_progress(int(year))
+        st.dataframe(ym_df, use_container_width=True, hide_index=True)
+        st.bar_chart(ym_df.set_index("月份")[["计划项目完成", "实际项目完成"]])
+        st.line_chart(ym_df.set_index("月份")[["计划项目完成", "实际项目完成"]])
+
+    st.divider()
+    st.subheader("稽查员月/季/年完成情况")
+    with db_session() as db:
+        auditors = db.query(Auditor).order_by(Auditor.name.asc()).all()
+    target_map = get_monthly_target_map()
+    if auditors:
+        edit_rows = []
+        for a in auditors:
+            edit_rows.append({"稽查员": a.name, "每月计划院次": int(target_map.get(int(a.id), 6) or 6)})
+        with st.form("auditor_month_target_form", clear_on_submit=False):
+            edited_plan_df = st.data_editor(pd.DataFrame(edit_rows), use_container_width=True, hide_index=True, num_rows="fixed")
+            if st.form_submit_button("保存每人每月计划院次", type="primary"):
+                name_to_id = {a.name: int(a.id) for a in auditors}
+                for _, r in pd.DataFrame(edited_plan_df).iterrows():
+                    nm = normalize_text(r.get("稽查员"))
+                    if nm in name_to_id:
+                        save_monthly_target(name_to_id[nm], _safe_int(r.get("每月计划院次"), 6) or 6)
+                st.success("已保存")
+                st.rerun()
+
+        auditor_df = get_auditor_completion_df(period_type, int(year), int(period_value))
+        st.dataframe(auditor_df, use_container_width=True, hide_index=True)
+        if not auditor_df.empty:
+            st.bar_chart(auditor_df.set_index("稽查员")[["本周期计划院次", "本周期实际院次"]])
+            st.line_chart(auditor_df.set_index("稽查员")[["本周期计划院次", "本周期实际院次"]])
 # -------------------- 页面：兼职库 --------------------
 elif page == "兼职库":
     st.subheader("兼职库")
@@ -2610,11 +2527,60 @@ elif page == "日历视图":
     month = c3.selectbox("月份", list(range(1, 13)), index=date.today().month - 1, key="cal_month")
     auditor_id = auditor_options[auditor_label]
 
-    cal_payload = load_calendar_page_payload(get_data_version(), int(year), int(month), auditor_id)
-    month_start = cal_payload["month_start"]
-    month_end = cal_payload["month_end"]
-    direct_rows_raw = cal_payload["direct_rows_raw"]
-    all_schedules_rows = cal_payload["all_schedules_rows"]
+    month_start = date(int(year), int(month), 1)
+    next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    month_end = next_month - timedelta(days=1)
+
+    with db_session() as db:
+        all_schedules = (
+            db.query(Schedule)
+            .options(joinedload(Schedule.task), joinedload(Schedule.auditor))
+            .filter(Schedule.start_date <= month_end, Schedule.end_date >= month_start)
+            .order_by(Schedule.start_date.asc())
+            .all()
+        )
+
+    direct_rows_raw = []
+    ensure_extra_tables()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT da.id, da.task_id, da.auditor_id, da.person_name, da.is_part_time, da.role, da.start_date, da.end_date, da.notes,
+                       t.project_name, t.site_city
+                FROM direct_assignments da
+                LEFT JOIN tasks t ON da.task_id = t.id
+                WHERE da.start_date <= :month_end AND da.end_date >= :month_start
+                ORDER BY da.start_date ASC, da.person_name ASC
+            """),
+            {"month_start": d2s(month_start), "month_end": d2s(month_end)},
+        ).mappings().all()
+        direct_rows_raw = [dict(r) for r in rows]
+
+    direct_task_ids = {int(r["task_id"]) for r in direct_rows_raw}
+    all_schedules_rows = []
+
+    for s in all_schedules:
+        if int(s.task_id) in direct_task_ids:
+            continue
+        if auditor_id and s.auditor_id != auditor_id:
+            continue
+        all_schedules_rows.append(
+            {
+                "id": s.id,
+                "auditor_id": s.auditor_id,
+                "auditor_name": (s.auditor.name if s.auditor else ""),
+                "task_id": s.task_id,
+                "project_name": (s.task.project_name if s.task else ""),
+                "site_city": (s.task.site_city if s.task else ""),
+                "role": s.role,
+                "start_date": s.start_date,
+                "end_date": s.end_date,
+                "travel_from_city": s.travel_from_city,
+                "travel_to_city": s.travel_to_city,
+                "distance_km": float(s.distance_km or 0),
+                "source": "schedule",
+            }
+        )
 
     direct_rows = []
     for r in direct_rows_raw:
@@ -2639,6 +2605,7 @@ elif page == "日历视图":
         )
 
     merged_rows = all_schedules_rows + direct_rows
+    calendar_detail_map = build_calendar_detail_map(merged_rows)
     day_marks = {it.get("date"): it for it in load_day_marks() if it.get("date", "")[:7] == month_start.strftime("%Y-%m")}
 
     events_by_day = {}
@@ -2697,6 +2664,8 @@ elif page == "日历视图":
                 + "</div>",
                 unsafe_allow_html=True,
             )
+
+    render_day_detail_panel(calendar_detail_map)
 
     st.divider()
     st.subheader("本月排班明细")
