@@ -2596,6 +2596,8 @@ def load_month_schedule_detail_rows(year: int, month: int):
     month_end = next_month - timedelta(days=1)
 
     rows = []
+    existing_schedule_keys = set()
+
     with db_session() as db:
         schedules = (
             db.query(Schedule)
@@ -2607,6 +2609,9 @@ def load_month_schedule_detail_rows(year: int, month: int):
         for s in schedules:
             if not s.task:
                 continue
+            person_name = s.auditor.name if s.auditor else ""
+            key = (int(s.task_id), person_name, d2s(s.start_date), d2s(s.end_date), s.role)
+            existing_schedule_keys.add(key)
             rows.append({
                 "来源": "标准排班",
                 "记录ID": int(s.id),
@@ -2614,7 +2619,7 @@ def load_month_schedule_detail_rows(year: int, month: int):
                 "项目": s.task.project_name if s.task else "",
                 "城市": s.task.site_city if s.task else "",
                 "角色": "组长" if s.role == "leader" else "成员",
-                "人员": s.auditor.name if s.auditor else "",
+                "人员": person_name,
                 "开始日期": d2s(s.start_date),
                 "结束日期": d2s(s.end_date),
                 "_source_type": "schedule",
@@ -2628,20 +2633,28 @@ def load_month_schedule_detail_rows(year: int, month: int):
                 WHERE start_date <= :month_end AND end_date >= :month_start
                 ORDER BY start_date ASC, id ASC
             """), {"month_start": d2s(month_start), "month_end": d2s(month_end)}).mappings().all()
+
         with db_session() as db:
             task_map = {int(t.id): t for t in db.query(Task).all()}
+
         for r in drows:
-            task_obj = task_map.get(int(r["task_id"])) if r.get("task_id") is not None else None
+            if r.get("task_id") is None:
+                continue
+            task_obj = task_map.get(int(r["task_id"]))
             if not task_obj:
+                continue
+            person_name = r.get("person_name") or ""
+            key = (int(r["task_id"]), person_name, str(r.get("start_date") or ""), str(r.get("end_date") or ""), r.get("role") or "")
+            if key in existing_schedule_keys:
                 continue
             rows.append({
                 "来源": "已定直录",
                 "记录ID": int(r["id"]),
                 "任务ID": int(r["task_id"]),
-                "项目": task_obj.project_name if task_obj else "",
-                "城市": task_obj.site_city if task_obj else "",
+                "项目": task_obj.project_name,
+                "城市": task_obj.site_city,
                 "角色": "组长" if r.get("role") == "leader" else "成员",
-                "人员": r.get("person_name") or "",
+                "人员": person_name,
                 "开始日期": str(r.get("start_date") or ""),
                 "结束日期": str(r.get("end_date") or ""),
                 "_source_type": "direct",
@@ -2651,7 +2664,6 @@ def load_month_schedule_detail_rows(year: int, month: int):
 
     rows.sort(key=lambda x: (x["开始日期"], x["任务ID"], x["来源"], x["记录ID"]))
     return rows
-
 
 def delete_schedule_detail_row(source_type: str, record_id: int, task_id: int):
     if source_type == "schedule":
@@ -2670,7 +2682,6 @@ def delete_schedule_detail_row(source_type: str, record_id: int, task_id: int):
                 sync_task_schedules_from_direct_assignments(task)
         return True
     return False
-
 
 def update_schedule_detail_row(source_type: str, record_id: int, task_id: int, role_label: str, person_name: str, start_date_value, end_date_value):
     start_d = safe_parse_date(start_date_value)
@@ -2886,104 +2897,53 @@ if page == "日历视图":
 
     st.divider()
     st.subheader("本月排班明细")
-    rows = []
-    for s in merged_rows:
-        rows.append(
-            {
-                "来源": "已定直录" if s.get("source") == "direct" else "标准排班",
-                "记录ID": s.get("id"),
-                "任务ID": s.get("task_id"),
-                "项目": s.get("project_name") or "",
-                "城市": s.get("site_city") or "",
-                "角色": "组长" if s.get("role") == "leader" else "成员",
-                "人员": s.get("auditor_name") or "",
-                "开始日期": d2s(s.get("start_date")),
-                "结束日期": d2s(s.get("end_date")),
-            }
+    month_detail_rows = load_month_schedule_detail_rows(int(year), int(month))
+    if month_detail_rows:
+        st.dataframe(
+            pd.DataFrame([{k: v for k, v in r.items() if not str(k).startswith("_")} for r in month_detail_rows]),
+            use_container_width=True,
+            height=420,
+            hide_index=True,
         )
-    show_table(rows, 320)
 
-    st.divider()
-    st.subheader("修改已定项目人员明细")
-    direct_task_options = {}
-    with db_session() as db:
-        all_tasks = db.query(Task).order_by(Task.id.desc()).all()
-    for t in all_tasks:
-        if get_direct_assignments(int(t.id)):
-            direct_task_options[f"#{t.id} {t.project_name}｜{t.site_city}｜{d2s(t.start_date)}"] = int(t.id)
+        row_options = {
+            f"{r['来源']}｜记录{r['记录ID']}｜任务{r['任务ID']}｜{r['项目']}｜{r['人员']}": (r["_source_type"], r["记录ID"], r["任务ID"])
+            for r in month_detail_rows
+        }
+        selected_label = st.selectbox("选择要修改或删除的排班明细", list(row_options.keys()), key="calendar_detail_edit_select")
+        selected_source, selected_record_id, selected_task_id = row_options[selected_label]
+        selected_row = next(r for r in month_detail_rows if r["记录ID"] == selected_record_id and r["_source_type"] == selected_source)
 
-    if direct_task_options:
-        dtask_label = st.selectbox("选择已定项目任务", list(direct_task_options.keys()), key="calendar_direct_task_select")
-        dtask_id = direct_task_options[dtask_label]
-        dtask = next((t for t in all_tasks if int(t.id) == int(dtask_id)), None)
-        existing = get_direct_assignments(int(dtask_id))
-        df = pd.DataFrame([
-            {
-                "类型": "兼职" if bool(r.get("is_part_time")) else "内部稽查员",
-                "人员姓名": r.get("person_name", ""),
-                "角色": "组长" if str(r.get("role")) == "leader" else "成员",
-                "开始日期": str(r.get("start_date")),
-                "结束日期": str(r.get("end_date")),
-                "备注": r.get("notes", "") or "",
-            }
-            for r in existing
-        ])
-        if df.empty:
-            df = pd.DataFrame(columns=["类型", "人员姓名", "角色", "开始日期", "结束日期", "备注"])
+        with st.expander("修改 / 删除本条排班明细", expanded=True):
+            c1, c2, c3, c4 = st.columns(4)
+            edit_person = c1.text_input("人员", value=selected_row["人员"], key=f"edit_person_{selected_source}_{selected_record_id}")
+            edit_role = c2.selectbox("角色", ["组长", "成员"], index=0 if selected_row["角色"] == "组长" else 1, key=f"edit_role_{selected_source}_{selected_record_id}")
+            edit_start = c3.text_input("开始日期", value=selected_row["开始日期"], key=f"edit_start_{selected_source}_{selected_record_id}")
+            edit_end = c4.text_input("结束日期", value=selected_row["结束日期"], key=f"edit_end_{selected_source}_{selected_record_id}")
 
-        with st.form("calendar_direct_edit_form", clear_on_submit=False):
-            edited = st.data_editor(
-                df,
-                use_container_width=True,
-                hide_index=True,
-                num_rows="dynamic",
-                key="calendar_direct_edit_editor",
-                column_config={
-                    "类型": st.column_config.SelectboxColumn(options=["内部稽查员", "兼职"]),
-                    "角色": st.column_config.SelectboxColumn(options=["组长", "成员"]),
-                },
-            )
-            c1, c2 = st.columns(2)
-            save_direct_calendar = c1.form_submit_button("保存修改")
-            sync_direct_calendar = c2.form_submit_button("同步到排班", type="primary")
-
-        if save_direct_calendar or sync_direct_calendar:
-            with db_session() as db:
-                name_to_id = {a.name: a.id for a in db.query(Auditor).all()}
-            rows_to_save = []
-            for _, r in pd.DataFrame(edited).iterrows():
-                nm = str(r.get("人员姓名", "")).strip()
-                if not nm:
-                    continue
-                rows_to_save.append(
-                    {
-                        "auditor_id": None if str(r.get("类型", "")) == "兼职" else name_to_id.get(nm),
-                        "person_name": nm,
-                        "is_part_time": str(r.get("类型", "")) == "兼职",
-                        "role": "leader" if str(r.get("角色", "")) == "组长" else "member",
-                        "start_date": safe_parse_date(r.get("开始日期")),
-                        "end_date": safe_parse_date(r.get("结束日期")),
-                        "notes": str(r.get("备注", "")).strip(),
-                    }
+            b1, b2 = st.columns(2)
+            if b1.button("保存本条修改", key=f"save_sched_row_{selected_source}_{selected_record_id}", type="primary"):
+                ok, msg = update_schedule_detail_row(
+                    selected_source, selected_record_id, selected_task_id, edit_role, edit_person, edit_start, edit_end
                 )
-            replace_direct_assignments(int(dtask_id), rows_to_save)
-            if save_direct_calendar:
-                st.success("已保存已定项目人员明细")
-                st.rerun()
-            if sync_direct_calendar and dtask:
-                ok, msg = sync_task_schedules_from_direct_assignments(dtask)
                 if ok:
+                    clear_runtime_caches_after_data_change()
                     st.success(msg)
                     st.rerun()
                 else:
                     st.error(msg)
 
-    with db_session() as db:
-        all_ics = build_ics_events(db)
-        st.download_button("导出全部 ICS 日历", all_ics, file_name="wnrh_all.ics", key="dl_all_ics")
-        if auditor_id:
-            one_ics = build_ics_events(db, auditor_id=auditor_id)
-            st.download_button("导出当前稽查员 ICS 日历", one_ics, file_name=f"wnrh_auditor_{auditor_id}.ics", key="dl_one_ics")
+            if b2.button("删除本条排班明细", key=f"delete_sched_row_{selected_source}_{selected_record_id}"):
+                ok = delete_schedule_detail_row(selected_source, selected_record_id, selected_task_id)
+                if ok:
+                    clear_runtime_caches_after_data_change()
+                    st.success("已删除")
+                    st.rerun()
+                else:
+                    st.error("删除失败")
+    else:
+        st.info("本月暂无排班明细")
+
 
 # -------------------- 账号管理 --------------------
 # -------------------- 账号管理 --------------------
