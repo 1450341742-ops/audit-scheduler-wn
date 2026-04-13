@@ -2700,7 +2700,7 @@ def update_schedule_detail_row(source_type: str, record_id: int, task_id: int, r
     return False, "未知来源"
 
 # -------------------- 日历视图 --------------------
-elif page == "日历视图":
+if page == "日历视图":
     st.subheader("日历视图")
     st.caption("按月查看排班、节假日标识，并支持导出 ICS 日历。")
 
