@@ -628,6 +628,111 @@ STATUS_MAP_REV = {v: k for k, v in STATUS_MAP.items()}
 BOOL_TRUE = {"是", "Y", "y", "yes", "YES", "True", "true", "1", "是/yes"}
 
 
+
+def get_month_date_range(year: int, month: int):
+    start_d = date(int(year), int(month), 1)
+    next_month = (start_d.replace(day=28) + timedelta(days=4)).replace(day=1)
+    end_d = next_month - timedelta(days=1)
+    return start_d, end_d
+
+
+def recalc_all_auditor_runtime_stats():
+    today = date.today()
+    month_start, month_end = get_month_date_range(today.year, today.month)
+
+    with db_session() as db:
+        auditors = db.query(Auditor).all()
+        schedules = db.query(Schedule).options(joinedload(Schedule.task), joinedload(Schedule.auditor)).all()
+
+        schedules_by_auditor = {}
+        for s in schedules:
+            schedules_by_auditor.setdefault(int(s.auditor_id), []).append(s)
+
+        changed = False
+        for a in auditors:
+            own = sorted(
+                schedules_by_auditor.get(int(a.id), []),
+                key=lambda x: ((x.end_date or x.start_date), x.id)
+            )
+
+            # 本月院次：按与本月有重叠的任务数统计
+            monthly_cases = 0
+            travel_days = 0
+            last_city = None
+            last_date = None
+
+            for s in own:
+                s_start = s.start_date
+                s_end = s.end_date or s.start_date
+                if not (s_end < month_start or s_start > month_end):
+                    monthly_cases += 1
+                    overlap_start = max(s_start, month_start)
+                    overlap_end = min(s_end, month_end)
+                    travel_days += max(0, (overlap_end - overlap_start).days + 1)
+
+                if last_date is None or s_end > last_date:
+                    last_date = s_end
+                    last_city = s.travel_to_city or (s.task.site_city if s.task else None)
+
+            # 连续天数：从最近一段连续排班计算
+            continuous_days = 0
+            if own:
+                merged = []
+                for s in sorted(own, key=lambda x: (x.start_date, x.end_date or x.start_date)):
+                    s_start = s.start_date
+                    s_end = s.end_date or s.start_date
+                    if not merged:
+                        merged.append([s_start, s_end])
+                    else:
+                        prev_start, prev_end = merged[-1]
+                        if s_start <= (prev_end + timedelta(days=1)):
+                            if s_end > prev_end:
+                                merged[-1][1] = s_end
+                        else:
+                            merged.append([s_start, s_end])
+                last_seg = merged[-1]
+                continuous_days = max(0, (last_seg[1] - last_seg[0]).days + 1)
+
+            if int(a.monthly_cases or 0) != int(monthly_cases):
+                a.monthly_cases = int(monthly_cases)
+                changed = True
+            if int(a.travel_days or 0) != int(travel_days):
+                a.travel_days = int(travel_days)
+                changed = True
+            if int(a.continuous_days or 0) != int(continuous_days):
+                a.continuous_days = int(continuous_days)
+                changed = True
+            if (a.last_task_end_city or None) != (last_city or None):
+                a.last_task_end_city = last_city or None
+                changed = True
+            if (a.last_task_end_date or None) != (last_date or None):
+                a.last_task_end_date = last_date or None
+                changed = True
+
+        if changed:
+            safe_commit(db, "根据最新排班重算稽查员统计")
+
+
+def get_auditor_period_metrics_df(period_type: str, year: int, period_value: int):
+    start_d, end_d = get_period_date_range(period_type, year, period_value)
+    with db_session() as db:
+        auditors = db.query(Auditor).order_by(Auditor.name.asc()).all()
+        schedules = db.query(Schedule).options(joinedload(Schedule.task), joinedload(Schedule.auditor)).all()
+
+    rows = []
+    for a in auditors:
+        count = 0
+        for s in schedules:
+            if int(s.auditor_id) != int(a.id):
+                continue
+            s_start = s.start_date
+            s_end = s.end_date or s.start_date
+            if not (s_end < start_d or s_start > end_d):
+                count += 1
+        rows.append({"稽查员": a.name, "实际完成院次": int(count)})
+    return pd.DataFrame(rows)
+
+
 def ics_escape(s: str) -> str:
     return (s or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
 
@@ -1428,9 +1533,6 @@ def get_yearly_month_progress(year: int):
             "计划项目完成": int(target.get("target_projects", 0) or 0),
             "实际项目完成": int(completed_projects),
             "已排项目数": int(recorded_projects),
-            "计划人员院次": int(target.get("target_staffing", 0) or 0),
-            "实际人员院次": int(staffing_completed),
-            "已排人员院次": int(staffing_scheduled),
         })
     return pd.DataFrame(rows)
 
@@ -1505,8 +1607,6 @@ def render_calendar_day_popover(day_obj: date, items: list[dict], use_explicit_h
 
     grouped = {}
     for item in items:
-        if not (item.get("project_name") or ""):
-            continue
         key = (
             item.get("project_name") or "",
             item.get("site_city") or "",
@@ -1768,6 +1868,7 @@ elif page == "批量排班":
 
 # -------------------- 稽查员管理 --------------------
 elif page == "稽查员管理":
+    recalc_all_auditor_runtime_stats()
     st.subheader("稽查员管理")
 
     with st.form("auditor_form", clear_on_submit=True):
@@ -2167,8 +2268,9 @@ elif page == "任务管理":
 
 # -------------------- 页面：指标统计 --------------------
 elif page == "指标统计":
+    recalc_all_auditor_runtime_stats()
     st.subheader("指标统计")
-    st.caption("支持录入院次指标数量，并自动统计目标、已排、实际，以及年度月度趋势和每位稽查员月/季/年的计划与实际完成情况。")
+    st.caption("支持录入院次指标数量，并自动统计目标、已排、实际，以及年度月度趋势和每位稽查员月/季/年的实际完成情况。")
 
     c1, c2, c3 = st.columns(3)
     period_type = c1.selectbox("统计周期", ["monthly", "quarterly", "yearly"], format_func=lambda x: {"monthly":"月度","quarterly":"季度","yearly":"年度"}[x])
@@ -2183,28 +2285,24 @@ elif page == "指标统计":
 
     target = get_target_row(period_type, int(year), int(period_value))
     with st.form("target_form", clear_on_submit=False):
-        c1, c2 = st.columns(2)
-        target_projects = c1.number_input("院次指标数量", min_value=0, value=int(target.get("target_projects", 0) or 0), step=1)
-        target_staffing = c2.number_input("人员院次安排数量", min_value=0, value=int(target.get("target_staffing", 0) or 0), step=1)
+        target_projects = st.number_input("院次指标数量", min_value=0, value=int(target.get("target_projects", 0) or 0), step=1)
         if st.form_submit_button("保存指标", type="primary"):
-            save_target_row(period_type, int(year), int(period_value), int(target_projects), int(target_staffing))
+            save_target_row(period_type, int(year), int(period_value), int(target_projects), 0)
             st.success("指标已保存")
             st.rerun()
 
     start_d, end_d, scheduled_projects, actual_projects, scheduled_staffing, actual_staffing, detail_rows = get_progress_stats(period_type, int(year), int(period_value))
     target = get_target_row(period_type, int(year), int(period_value))
     t_projects = int(target.get("target_projects", 0) or 0)
-    t_staff = int(target.get("target_staffing", 0) or 0)
 
     summary_df = pd.DataFrame([
         {"指标": "项目院次数", "目标": t_projects, "已排": scheduled_projects, "实际": actual_projects, "完成率": f"{round(actual_projects / t_projects * 100, 1) if t_projects else 0.0}%"},
-        {"指标": "人员院次安排数", "目标": t_staff, "已排": scheduled_staffing, "实际": actual_staffing, "完成率": f"{round(actual_staffing / t_staff * 100, 1) if t_staff else 0.0}%"},
     ])
     st.write(f"统计区间：{d2s(start_d)} ~ {d2s(end_d)}")
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
     st.bar_chart(summary_df.set_index("指标")[["目标", "已排", "实际"]])
 
-    st.subheader("项目完成进度及人员安排进度明细")
+    st.subheader("项目完成进度明细")
     if detail_rows:
         st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
     else:
@@ -2821,35 +2919,8 @@ def update_schedule_detail_row(source_type: str, record_id: int, task_id: int, r
         return True, "已更新"
     return False, "未知来源"
 
-
-def cleanup_orphan_calendar_rows():
-    """清理任务已删除后遗留在 direct_assignments / schedules 的脏数据。"""
-    try:
-        with engine.begin() as conn:
-            conn.execute(text("""
-                DELETE FROM direct_assignments
-                WHERE task_id NOT IN (SELECT id FROM tasks)
-            """))
-    except Exception:
-        pass
-
-    try:
-        with db_session() as db:
-            rows = db.query(Schedule).options(joinedload(Schedule.task)).all()
-            removed = False
-            for s in rows:
-                if not s.task:
-                    db.delete(s)
-                    removed = True
-            if removed:
-                safe_commit(db, "清理已删除任务遗留排班")
-    except Exception:
-        pass
-
-
 # -------------------- 日历视图 --------------------
 if page == "日历视图":
-    cleanup_orphan_calendar_rows()
     st.subheader("日历视图")
     st.caption("按月查看排班、节假日标识，并支持导出 ICS 日历。")
 
@@ -2905,8 +2976,7 @@ if page == "日历视图":
             """),
             {"month_start": d2s(month_start), "month_end": d2s(month_end)},
         ).mappings().all()
-        # 过滤已删除任务留下的脏数据
-        direct_rows_raw = [dict(r) for r in rows if r.get("project_name")]
+        direct_rows_raw = [dict(r) for r in rows]
 
     direct_task_ids = {int(r["task_id"]) for r in direct_rows_raw}
     all_schedules_rows = []
